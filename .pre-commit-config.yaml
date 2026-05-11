@@ -1,0 +1,35 @@
+# Pre-commit 钩子配置 - 防止提交敏感信息
+# 安装: pip install pre-commit
+# 启用: pre-commit install
+
+repos:
+  # 检测密钥和高熵字符串
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.4.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: package.lock.json|yarn.lock|test|tests
+
+  # 检测 AWS 密钥
+  - repo: https://github.com/awslabs/git-secrets
+    rev: b9e96b3212c152e169650564d69ba3f01d43c764
+    hooks:
+      - id: git-secrets
+
+  # TruffleHog - 扫描 Git 历史
+  - repo: https://github.com/trufflesecurity/trufflehog
+    rev: v3.63.2
+    hooks:
+      - id: trufflehog
+        args: ["git", "file://.", "--only-verified", "--fail"]
+
+  # 基础检查
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ['--maxkb=500']

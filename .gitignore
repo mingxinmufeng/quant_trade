@@ -1,0 +1,104 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Environment variables
+.env
+.env.local
+
+# Data files (local cache)
+data_store/
+!data_store/.gitkeep
+
+# Logs
+logs/
+*.log
+!logs/.gitkeep
+
+# Reports and outputs
+reports/
+*.csv
+*.xlsx
+*.pdf
+!reports/.gitkeep
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+
+# Model artifacts
+models/
+*.pkl
+*.joblib
+*.h5
+
+# Optuna database
+*.db
+*.sqlite
+*.sqlite3
+
+# Local configuration overrides
+config.local.yaml
+config_override.yaml

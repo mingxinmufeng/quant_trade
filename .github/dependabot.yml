@@ -1,0 +1,62 @@
+# Dependabot 配置 - 量化交易系统
+# 仅启用安全更新，禁用版本更新以保护回测一致性
+
+version: 2
+updates:
+  # Python pip 依赖
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    
+    # 安全更新配置
+    open-pull-requests-limit: 10
+    
+    # 分组安全更新（减少PR噪音）
+    groups:
+      security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+          - "minor"
+    
+    # 不自动更新版本（仅安全补丁）
+    # 量化系统依赖版本严格锁定
+    versioning-strategy: increase-if-necessary
+    
+    # 忽略某些包的非安全更新
+    ignore:
+      - dependency-name: "pandas"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "numpy"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "pyarrow"
+        update-types: ["version-update:semver-major"]
+    
+    # PR 标签
+    labels:
+      - "dependencies"
+      - "security"
+    
+    # 指派审查者
+    reviewers:
+      - "mingxinmufeng"
+    
+    # 提交消息格式
+    commit-message:
+      prefix: "security"
+      include: "scope"
+
+  # GitHub Actions 工作流
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    labels:
+      - "ci"
+    open-pull-requests-limit: 5
