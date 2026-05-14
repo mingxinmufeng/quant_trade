@@ -1,32 +1,30 @@
-# ============================================================
-# A股量化交易系统 - Python 依赖清单
-# Python 3.11+ 要求
-# 安装: pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-# ============================================================
+﻿# ===== 核心数据科学 =====
+pandas>=3.0.3
+numpy>=2.0.0
+pyarrow>=19.0.0
 
-# --- 科学计算（严格锁定，防止计算逻辑微差导致回测结果不一致）---
-pandas==2.2.3
-numpy==1.26.4
-pyarrow==15.0.2
-scipy==1.13.1                  # pandas_ta 隐式依赖，显式锁定避免冲突
-pandas_ta==0.3.14b0
-optuna==3.6.1
+# ===== A股数据源 =====
+akshare>=1.18.60          # 主数据源，更新频繁，不锁死
+baostock>=0.9.1           # 备用，免费日线+财务数据
+tushare>=1.4.29           # 备用，需token
 
-# --- 数据源：下限锁定 + 上限防 breaking change ---
-akshare>=1.12.0,<2.0.0
-baostock>=0.8.8,<1.0.0
-tushare>=1.4.0,<2.0.0
+# ===== 技术指标 =====
+pandas-ta-classic>=0.4.47 # 原版社区维护分支，Production/Stable
 
-# --- 可视化（回测净值曲线、回撤图、绩效报告）---
-matplotlib==3.9.2
+# ===== 超参优化 =====
+optuna>=4.7.0
 
-# --- 工具库 ---
-pyyaml==6.0.2
-python-dotenv==1.0.1
-loguru==0.7.3
-typer==0.12.3
-tqdm==4.66.5                   # 数据下载进度条
+# ===== 配置与日志 =====
+pyyaml>=6.0.2
+python-dotenv>=1.1.0
+loguru>=0.7.3
 
-# --- 测试 ---
-pytest==8.3.2
-pytest-cov==5.0.0              # 测试覆盖率（CI/CD 用）
+# ===== CLI =====
+typer>=0.15.2
+
+# ===== 测试 =====
+pytest>=8.3.5
+pytest-cov>=6.1.0
+
+# ===== 可选：加速 =====
+numba>=0.61.0             # pandas-ta-classic 性能加速，可选
