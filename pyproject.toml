@@ -1,0 +1,259 @@
+# ============================================================
+# A股量化交易系统 - 项目元数据与构建配置
+# ============================================================
+# 安装方式（开发模式）：
+#   pip install -e .
+# 安装方式（含开发依赖）：
+#   pip install -e ".[dev]"
+#
+# 安装完成后即可在任意位置使用：
+#   from a_share_quant_pro.utils.helpers import init_logging
+#   from a_share_quant_pro.strategy import BaseStrategy, Signal
+#
+# 包名与目录映射：
+#   import 名 `a_share_quant_pro` → 物理目录 `src/`
+#   通过 [tool.setuptools] package-dir 实现，无需移动现有代码
+# ============================================================
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# ------------------------------------------------------------
+# 项目元数据（PEP 621）
+# ------------------------------------------------------------
+[project]
+name = "a-share-quant-pro"
+version = "0.1.0"
+description = "生产级 A 股量化交易框架：数据层 + 因子层 + 策略层 + 回测引擎 + 风控层"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "A_Share_Quant_Pro Contributors" }
+]
+keywords = [
+    "quant",
+    "quantitative-trading",
+    "a-share",
+    "backtest",
+    "china-stock-market",
+    "akshare",
+    "baostock",
+    "tushare",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+
+# ------------------------------------------------------------
+# 运行时依赖（与 requirements.txt 保持一致，使用 >= 不锁小版本）
+# ------------------------------------------------------------
+dependencies = [
+    # 核心数据科学
+    "pandas>=3.0.3",
+    "numpy>=2.0.0",
+    "pyarrow>=19.0.0",
+
+    # A 股数据源（三级容灾）
+    "akshare>=1.18.60",
+    "baostock>=0.9.1",
+    "tushare>=1.4.29",
+
+    # 技术指标（原版 pandas-ta 的社区维护分支）
+    "pandas-ta-classic>=0.4.47",
+
+    # 超参优化
+    "optuna>=4.7.0",
+
+    # 配置与日志
+    "pyyaml>=6.0.2",
+    "python-dotenv>=1.1.0",
+    "loguru>=0.7.3",
+
+    # CLI
+    "typer>=0.15.2",
+]
+
+# ------------------------------------------------------------
+# 可选依赖组
+# ------------------------------------------------------------
+[project.optional-dependencies]
+# 开发与测试
+dev = [
+    "pytest>=8.3.5",
+    "pytest-cov>=6.1.0",
+    "pytest-mock>=3.14.0",
+    "ruff>=0.8.0",
+    "black>=24.10.0",
+    "mypy>=1.13.0",
+    "pre-commit>=4.0.0",
+]
+# 性能加速（可选）
+speedup = [
+    "numba>=0.61.0",
+]
+# 一次性安装全部
+all = [
+    "a-share-quant-pro[dev,speedup]",
+]
+
+# ------------------------------------------------------------
+# 命令行入口
+# ------------------------------------------------------------
+[project.scripts]
+quant = "main:app"
+
+# ------------------------------------------------------------
+# 项目链接（可选）
+# ------------------------------------------------------------
+[project.urls]
+Homepage = "https://github.com/your-org/a-share-quant-pro"
+Repository = "https://github.com/your-org/a-share-quant-pro"
+Issues = "https://github.com/your-org/a-share-quant-pro/issues"
+
+# ============================================================
+# Setuptools 构建配置：src/ 布局 → a_share_quant_pro 命名空间
+# ============================================================
+# 关键映射：
+#   src/utils/      → a_share_quant_pro.utils
+#   src/data/       → a_share_quant_pro.data
+#   src/factor/     → a_share_quant_pro.factor
+#   src/strategy/   → a_share_quant_pro.strategy
+#   src/engine/     → a_share_quant_pro.engine
+#   src/risk/       → a_share_quant_pro.risk
+#   src/main.py     → a_share_quant_pro.main（通过同名顶层模块）
+# ============================================================
+# 显式列出所有包名 + 显式 package-dir 映射。
+# 不使用 [tool.setuptools.packages.find]，因为 find + 根 package-dir 映射
+# 不会自动给子包加 "a_share_quant_pro." 前缀（实测 MAPPING 为空）。
+#
+# 添加新模块的步骤：
+#   1. 创建 src/<module>/__init__.py
+#   2. 在 packages 列表追加  "a_share_quant_pro.<module>"
+#   3. 在 [tool.setuptools.package-dir] 追加  "a_share_quant_pro.<module>" = "src/<module>"
+#   4. pip install -e . --no-deps（无需 force-reinstall）
+[tool.setuptools]
+include-package-data = true
+packages = [
+    "a_share_quant_pro",
+    "a_share_quant_pro.utils",
+]
+
+[tool.setuptools.package-dir]
+"a_share_quant_pro" = "src"
+"a_share_quant_pro.utils" = "src/utils"
+
+[tool.setuptools.package-data]
+"a_share_quant_pro" = ["*.yaml", "*.yml", "*.json"]
+
+# ============================================================
+# 开发工具配置
+# ============================================================
+
+# ---------------- pytest ----------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--showlocals",
+    "--tb=short",
+]
+markers = [
+    "slow: 标记慢测试（涉及网络/IO，可通过 -m 'not slow' 跳过）",
+    "network: 需要外网（akshare/baostock/tushare）",
+    "integration: 集成测试",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:akshare.*",
+    "ignore::FutureWarning:pandas.*",
+]
+
+# ---------------- coverage ----------------
+[tool.coverage.run]
+branch = true
+source = ["src"]
+omit = [
+    "*/tests/*",
+    "*/__init__.py",
+    "src/main.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+show_missing = true
+precision = 2
+
+# ---------------- ruff（lint + format） ----------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "E501",  # 行长由 formatter 处理
+    "B008",  # typer 大量使用函数调用作默认值
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["B011", "S101"]
+"__init__.py" = ["F401"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ---------------- black ----------------
+[tool.black]
+line-length = 100
+target-version = ["py311", "py312"]
+include = '\.pyi?$'
+
+# ---------------- mypy ----------------
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false  # 项目逐步推进类型注解，初期宽松
+ignore_missing_imports = true
+check_untyped_defs = true
+files = ["src"]
+
+[[tool.mypy.overrides]]
+module = [
+    "akshare.*",
+    "baostock.*",
+    "tushare.*",
+    "pandas_ta.*",
+    "pandas_ta_classic.*",
+]
+ignore_missing_imports = true

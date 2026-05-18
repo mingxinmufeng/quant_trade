@@ -1,67 +1,88 @@
 # ============================================================
-# A股量化交易系统 - 全局配置文件
+# A股量化交易系统 - 全局配置文件（公开模板）
 # ============================================================
-# 说明：所有模块从此文件读取运行参数
-# 优先级：环境变量 > config.yaml > 代码默认值
+# 说明：
+#   - 所有模块从此文件读取运行参数
+#   - 优先级：CLI参数 > 环境变量 > 私有覆盖文件 > config.yaml > 代码默认值
+#   - 私有运行参数请放入 config.private.yaml（已加入 .gitignore）
+#   - 加载逻辑见 src/utils/config_loader.py
 # ============================================================
 
 # ------------------------------------------------------------
-# 数据层配置（src/data/）
+# 数据层（src/data/）
 # ------------------------------------------------------------
 data:
-  store_path: "data_store"              # 本地数据存储根目录（parquet文件）
-  sources: ["akshare", "baostock", "tushare"]  # 数据源优先级，前面的先用，失败后 fallback 到下一个
-  request_timeout: 15                   # 单次HTTP请求超时（秒）
-  stock_timeout: 60                     # 单只股票整体超时（秒，含重试）
+  store_path: "data_store"              # 本地数据存储根目录（parquet 文件）
+  sources: ["akshare", "baostock", "tushare"]  # 数据源优先级；前者失败自动 fallback 到下一个
+  request_timeout: 15                   # 单次 HTTP 请求超时（秒）
+  stock_timeout: 60                     # 单只股票整体超时（秒，含全部重试）
   retry_times: 3                        # 最大重试次数
-  retry_delays: [1, 2, 4, 8]            # 指数退避等待秒数（第1次失败等1秒，第2次等2秒...）
+  retry_delays: [1, 2, 4, 8]            # 指数退避等待秒数（第 N 次失败前等 delays[N-1] 秒）
   calendar_refresh_days: 7              # 交易日历缓存刷新周期（天），超过则重新下载
 
 # ------------------------------------------------------------
-# 执行层配置（src/engine/execution.py）
+# 股票池（src/data/universe.py，防幸存者偏差核心）
+# ------------------------------------------------------------
+universe:
+  min_list_days: 60                     # 上市最少天数，剔除新股波动期
+  exclude_st: true                      # 是否剔除 ST/*ST 股票
+  exclude_new_ipo: true                 # 是否剔除上市 min_list_days 天内的新股（与 min_list_days 协同）
+
+# ------------------------------------------------------------
+# 策略加载（src/strategy/loader.py）
+# ------------------------------------------------------------
+strategy:
+  # external_path 留空 → 使用 src/strategy/examples/ 内置示例
+  # external_path 非空 → 从该绝对路径加载私有策略文件 ${strategy_name}.py
+  external_path: ""                     # 私有策略目录（本地绝对路径，例如 D:/A_Share_Quant_Private/strategies）
+  strategy_name: "ma_rsi"               # 策略类名，需与文件名一致
+
+# ------------------------------------------------------------
+# 执行层（src/engine/execution.py）
 # ------------------------------------------------------------
 execution:
-  mode: "next_open"                     # 撮合时机：next_open=次日开盘成交 | close=当日收盘成交
-  volume_pct_limit: 0.10                # 单笔成交量限制：当日总成交量的10%（防止成交假设过于乐观）
-  t1_cash_freeze: true                  # 卖出资金是否T+1解冻（A股真实规则=true）
-  
-  # 滑点模型
+  mode: "next_open"                     # 撮合时机：next_open=次日开盘成交（推荐，防未来函数）| close=当日收盘成交
+  volume_pct_limit: 0.10                # 单笔成交量上限：当日该股票总成交量的占比（默认 10%）
+  min_order_amount: 1000                # 最小下单金额（元），低于此值的订单直接忽略
+  t1_cash_freeze: true                  # 卖出资金是否 T+1 解冻（A 股真实规则 = true）
+
+  # 滑点模型（三选一）
   slippage:
-    type: "percent"                     # 滑点类型：fixed=固定金额 | percent=百分比
-    fixed_amount: 0.01                  # 固定滑点（元/股），type=fixed 时生效
-    percent_rate: 0.001                 # 百分比滑点（0.1%），type=percent 时生效
-                                        # 买入价 = open × (1 + 0.001)
-                                        # 卖出价 = open × (1 - 0.001)
+    type: "percent"                     # fixed=固定金额（元/股） | percent=百分比 | open_gap=用 T+1 实际开盘价不另加滑点
+    fixed_amount: 0.01                  # type=fixed 时生效（元/股）
+    percent_rate: 0.001                 # type=percent 时生效（0.1%）；买价 = open*(1+r)，卖价 = open*(1-r)
 
 # ------------------------------------------------------------
-# 风控层配置（src/risk/risk_manager.py）
+# 风控层（src/risk/risk_manager.py）
 # ------------------------------------------------------------
 risk:
-  # 手续费（A股真实费率）
-  commission_rate: 0.00025              # 佣金率万2.5（双边收取）
-  stamp_duty: 0.0005                    # 印花税万5（仅卖出收取）
+  # 手续费（A 股真实费率）
+  commission_rate: 0.00025              # 佣金率万 2.5（双边收取）
+  stamp_duty: 0.0005                    # 印花税万 5（仅卖出收取）
   min_commission: 5.0                   # 单笔最低佣金（元）
-  
+
   # 仓位限制
-  max_single_position: 0.20             # 单只股票最大仓位：总资产的20%
-  max_industry_position: 0.30           # 单一行业最大仓位：总资产的30%
-  
+  max_single_position: 0.20             # 单只股票最大仓位：占总资产比例
+  max_industry_position: 0.30           # 单一行业最大仓位：占总资产比例
+
   # 止损线
-  daily_stop_loss: 0.05                 # 单日亏损≥5%：当日暂停新开仓
-  total_drawdown_stop: 0.15             # 累计回撤≥15%：暂停所有交易并告警
+  daily_stop_loss: 0.05                 # 单日亏损 ≥ 此值：当日暂停所有新开仓
+  total_drawdown_stop: 0.15             # 累计回撤 ≥ 此值：暂停所有交易并写 CRITICAL 日志
 
 # ------------------------------------------------------------
-# 回测层配置（src/engine/backtester.py）
+# 回测层（src/engine/backtester.py）
 # ------------------------------------------------------------
 backtest:
   initial_capital: 1_000_000            # 初始资金（元）
-  benchmark: "000300.SH"                # 基准指数：沪深300
-  risk_free_rate: 0.025                 # 无风险利率（年化2.5%，用于计算夏普比率）
+  benchmark: "000300.SH"                # 基准指数（沪深 300）
+  risk_free_rate: 0.025                 # 无风险利率（年化 2.5%，用于夏普比率计算）
 
 # ------------------------------------------------------------
-# 股票池配置（src/data/universe.py）
+# 日志（src/utils/helpers.py:init_logging）
 # ------------------------------------------------------------
-universe:
-  min_list_days: 60                     # 上市最少天数（剔除新股，避免首日波动）
-  exclude_st: true                      # 是否剔除ST/*ST股票
-  exclude_new_ipo: true                 # 是否剔除60天内新上市股票（同 min_list_days）
+logging:
+  log_dir: "logs"                       # 日志目录（已加入 .gitignore）
+  app_name: "quant_pro"                 # 日志文件名前缀
+  level: "INFO"                         # DEBUG | INFO | WARNING | ERROR | CRITICAL
+  rotation: "00:00"                     # 每天 00:00 切割新文件
+  retention: "30 days"                  # 日志保留时长
