@@ -232,10 +232,11 @@ def format_code(code: str) -> str:
     - "sh600000"   → "600000.SH"  （akshare 格式）
     - "SZ.000001"  → 不支持，请用 to_baostock_code 反向转换
     
-    交易所判断规则（按代码前缀）：
-    - 60xxxx, 68xxxx, 90xxxx     → 上海（.SH）
-    - 00xxxx, 30xxxx, 31xxxx     → 深圳（.SZ）
-    - 8xxxxx, 4xxxxx             → 北交所（.SZ，部分系统标 .BJ）
+    交易所判断规则（按代码前缀，截至 2024 年最新）：
+    - 上交所（.SH）：600/601/603/605 主板、688 科创板、689 科创板CDR、900 B股
+    - 深交所（.SZ）：000/001/003 主板、002 原中小板（已并入主板）、
+                      300/301 创业板、200 B股
+    - 北交所（.BJ）：43/83/87/88/92
     
     Args:
         code: 任意格式的股票代码
@@ -246,7 +247,7 @@ def format_code(code: str) -> str:
     code = code.strip().upper()
     
     # 已是标准格式
-    if ".SH" in code or ".SZ" in code or ".BJ" in code:
+    if code.endswith(".SH") or code.endswith(".SZ") or code.endswith(".BJ"):
         return code
     
     # 处理 sh/sz/bj 前缀（如 sh600000）
@@ -259,20 +260,33 @@ def format_code(code: str) -> str:
     
     # 纯数字：根据前缀推断
     if code.isdigit():
-        if code.startswith(("60", "68", "90")):
+        # 上交所
+        if code.startswith(("600", "601", "603", "605", "688", "689", "900")):
             return code + ".SH"
-        elif code.startswith(("00", "30", "31", "8", "4")):
+        # 北交所（必须在 "8"/"4" 兜底之前判断）
+        if code.startswith(("43", "83", "87", "88", "92")):
+            return code + ".BJ"
+        # 深交所
+        if code.startswith(("000", "001", "002", "003", "300", "301", "200")):
             return code + ".SZ"
-        else:
-            return code + ".SH"  # 兜底
+        # 其它 4/8 开头：保守归北交所（原新三板大多已退市/转板）
+        if code.startswith(("4", "8")):
+            return code + ".BJ"
+        # 兜底
+        return code + ".SH"
     
     return code
 
 
 def to_akshare_code(code: str) -> str:
     """
-    转换为 akshare 格式
+    转换为 akshare 新浪系接口格式
     000001.SZ → sz000001
+    830799.BJ → bj830799
+    
+    适用于：stock_zh_a_daily / stock_zh_a_spot 等新浪系 API。
+    注意：stock_zh_a_hist（东财接口）需要纯 6 位代码，不能用本函数输出，
+          应直接使用 format_code(code).split(".")[0]。
     """
     code = format_code(code)
     parts = code.split(".")
@@ -285,6 +299,10 @@ def to_baostock_code(code: str) -> str:
     """
     转换为 baostock 格式
     000001.SZ → sz.000001
+    600519.SH → sh.600519
+    
+    注意：baostock 数据源不覆盖北交所（.BJ），传入北交所代码虽会返回 "bj.xxxxxx"
+          格式字符串，但查询接口实际会返回空。
     """
     code = format_code(code)
     parts = code.split(".")
@@ -297,37 +315,63 @@ def to_baostock_code(code: str) -> str:
 # 6. A股涨跌停判断
 # ============================================================
 
-def get_limit_pct(code: str, is_st: bool = False) -> float:
+def get_limit_pct(
+    code: str,
+    is_st: bool = False,
+    trading_days_since_list: Optional[int] = None,
+) -> float:
     """
     获取股票涨跌停限制百分比
     
-    A股涨跌停规则（2023年全面注册制后）：
-    - 主板（60xxxx/00xxxx）：±10%
+    A股涨跌停规则（2023-02-17 全面注册制后）：
+    - 主板（60x/00x）：±10%
     - 主板 ST/*ST 股票：±5%
-    - 创业板（30xxxx）：±20%
-    - 科创板（68xxxx）：±20%
-    - 北交所（8xxxxx）：±30%
-    - 新股上市首日：±44%（需通过上市日期判断，本函数不处理）
+    - 创业板（300/301）：±20%
+    - 科创板（688/689）：±20%
+    - 北交所（43/83/87/88/92）：±30%
+    - 新股上市规则（仅在传入 trading_days_since_list 时生效）：
+        * 沪深主板 / 创业板 / 科创板：上市后前 5 个交易日不设涨跌幅限制，
+          第 6 交易日起恢复为各板块常规限制
+        * 北交所：上市首日不设涨跌幅限制，次交易日起 ±30%
     
     Args:
         code: 股票代码（任意格式）
         is_st: 是否为 ST 股票（影响主板限制）
+        trading_days_since_list: 距上市首日的"已交易天数"（含上市当日，从 1 计数）。
+            - None（默认）：忽略新股规则，按板块常规限制返回。
+            - 1：上市首日。
+            - 2~5：上市后第 2~5 个交易日。
+            - >=6：恢复常规限制。
+            注意：必须传入"交易日"差值而非自然日；交易日历计算应由调用方
+            （如数据/回测引擎中的 trading_calendar）完成，避免本工具函数引入额外依赖。
     
     Returns:
-        涨跌停限制（小数形式，如 0.10 表示 ±10%）
+        涨跌停限制（小数形式，如 0.10 表示 ±10%）。
+        新股不设限期间返回 float('inf')，调用方需据此跳过涨跌停过滤。
     """
     code = format_code(code)
+    suffix = code.split(".")[-1] if "." in code else ""
     base = code.split(".")[0]
+    is_bj = suffix == "BJ"
     
+    # 新股上市无涨跌幅限制窗口
+    if trading_days_since_list is not None and trading_days_since_list >= 1:
+        if is_bj and trading_days_since_list <= 1:
+            # 北交所：仅上市首日不设限
+            return float("inf")
+        if (not is_bj) and trading_days_since_list <= 5:
+            # 沪深主板 / 创业板 / 科创板：前 5 个交易日不设限
+            return float("inf")
+    
+    # 北交所（按后缀判断更可靠，覆盖 43/83/87/88/92 及其它 4/8 开头）
+    if is_bj:
+        return 0.30
     # 创业板
-    if base.startswith("30"):
+    if base.startswith(("300", "301")):
         return 0.20
     # 科创板
-    if base.startswith("68"):
+    if base.startswith(("688", "689")):
         return 0.20
-    # 北交所
-    if base.startswith(("8", "4")):
-        return 0.30
     # 主板 ST 股
     if is_st:
         return 0.05
@@ -511,6 +555,10 @@ if __name__ == "__main__":
     assert format_code("000001") == "000001.SZ"
     assert format_code("600519") == "600519.SH"
     assert format_code("sh600000") == "600000.SH"
+    assert format_code("830799") == "830799.BJ", "北交所 83 前缀应为 .BJ"
+    assert format_code("920001") == "920001.BJ", "北交所 92 前缀应为 .BJ"
+    assert format_code("688981") == "688981.SH"
+    assert format_code("301236") == "301236.SZ"
     assert to_akshare_code("000001.SZ") == "sz000001"
     assert to_baostock_code("600519.SH") == "sh.600519"
     logger.info("✓ 股票代码格式化测试通过")
@@ -520,6 +568,15 @@ if __name__ == "__main__":
     assert get_limit_pct("300750.SZ") == 0.20
     assert get_limit_pct("688981.SH") == 0.20
     assert get_limit_pct("600000.SH", is_st=True) == 0.05
+    assert get_limit_pct("830799") == 0.30, "北交所应为 30%"
+    assert get_limit_pct("920001") == 0.30, "北交所 92 前缀应为 30%"
+    # 新股上市窗口：沪深主板/创业板/科创板前 5 个交易日不设限
+    assert get_limit_pct("301236", trading_days_since_list=1) == float("inf"), "创业板新股首日无限制"
+    assert get_limit_pct("688981", trading_days_since_list=5) == float("inf"), "科创板新股第 5 日无限制"
+    assert get_limit_pct("301236", trading_days_since_list=6) == 0.20, "创业板第 6 日恢复 ±20%"
+    # 新股上市窗口：北交所仅首日不设限
+    assert get_limit_pct("830799", trading_days_since_list=1) == float("inf"), "北交所新股首日无限制"
+    assert get_limit_pct("830799", trading_days_since_list=2) == 0.30, "北交所第 2 日恢复 ±30%"
     logger.info("✓ 涨跌停限制测试通过")
     
     # 测试绩效计算

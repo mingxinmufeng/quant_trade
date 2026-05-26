@@ -91,6 +91,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "type": "percent",
             "fixed_amount": 0.01,
             "percent_rate": 0.001,
+            "tick_size": 0.01,
+            "min_ticks": 1,
         },
     },
     "risk": {

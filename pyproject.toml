@@ -145,11 +145,13 @@ include-package-data = true
 packages = [
     "a_share_quant_pro",
     "a_share_quant_pro.utils",
+    "a_share_quant_pro.data",
 ]
 
 [tool.setuptools.package-dir]
 "a_share_quant_pro" = "src"
 "a_share_quant_pro.utils" = "src/utils"
+"a_share_quant_pro.data" = "src/data"
 
 [tool.setuptools.package-data]
 "a_share_quant_pro" = ["*.yaml", "*.yml", "*.json"]

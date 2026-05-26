@@ -51,6 +51,10 @@ execution:
     type: "percent"                     # fixed=固定金额（元/股） | percent=百分比 | open_gap=用 T+1 实际开盘价不另加滑点
     fixed_amount: 0.01                  # type=fixed 时生效（元/股）
     percent_rate: 0.001                 # type=percent 时生效（0.1%）；买价 = open*(1+r)，卖价 = open*(1-r)
+    # —— A 股 tick 对齐（执行层据此把成交价归到合法报价档位）——
+    tick_size: 0.01                     # A 股股票最小变动单位（元）；沪深主板/创业板/科创板/北交所均为 0.01
+    min_ticks: 1                        # 滑点保底：即使按百分比算不到 1 个 tick，也至少滑 N 个 tick（保守模拟低价股流动性）
+                                        # 买入价向上对齐到 tick（对买方不利），卖出价向下对齐到 tick（对卖方不利）
 
 # ------------------------------------------------------------
 # 风控层（src/risk/risk_manager.py）
