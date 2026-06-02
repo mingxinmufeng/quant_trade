@@ -13,12 +13,17 @@
 # ------------------------------------------------------------
 data:
   store_path: "data_store"              # 本地数据存储根目录（parquet 文件）
-  sources: ["akshare", "baostock", "tushare"]  # 数据源优先级；前者失败自动 fallback 到下一个
+  sources: ["mootdx", "akshare", "baostock", "tushare"]  # 数据源优先级；前者失败自动 fallback 到下一个
+  factor_source: "sina"                 # 复权因子主源（固定单源，保证因子刻度一致）；可选 sina/tushare/em。不参与价格源 fallback
+  # 重构后：原始价与因子分离落盘，复权在 load 时按需合成（adjust=none/hfq/qfq），不再需要因子自愈
+  factor_selfheal_window: 30            # [已废弃] 保留仅为兼容旧脚本；新架构无自愈，本值被忽略
+  tdx_path: ""                          # 通达信安装目录（含 vipdoc）；留空则自动寻径，可在 config.private.yaml 里覆盖
   request_timeout: 15                   # 单次 HTTP 请求超时（秒）
   stock_timeout: 60                     # 单只股票整体超时（秒，含全部重试）
   retry_times: 3                        # 最大重试次数
   retry_delays: [1, 2, 4, 8]            # 指数退避等待秒数（第 N 次失败前等 delays[N-1] 秒）
   calendar_refresh_days: 7              # 交易日历缓存刷新周期（天），超过则重新下载
+  max_workers: 4                        # 增量更新并行线程数（按股票并行，IO 密集可数倍提速）；1=串行
 
 # ------------------------------------------------------------
 # 股票池（src/data/universe.py，防幸存者偏差核心）

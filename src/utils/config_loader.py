@@ -66,12 +66,16 @@ DOT_SEP = "."
 DEFAULT_CONFIG: Dict[str, Any] = {
     "data": {
         "store_path": "data_store",
-        "sources": ["akshare", "baostock", "tushare"],
+        "sources": ["mootdx", "akshare", "baostock", "tushare"],
+        "factor_source": "sina",
+        "factor_selfheal_window": 30,
+        "tdx_path": "",
         "request_timeout": 15,
         "stock_timeout": 60,
         "retry_times": 3,
         "retry_delays": [1, 2, 4, 8],
         "calendar_refresh_days": 7,
+        "max_workers": 4,
     },
     "universe": {
         "min_list_days": 60,

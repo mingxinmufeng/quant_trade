@@ -92,17 +92,66 @@ universe = Universe()
 stocks = universe.get_tradable_stocks("2024-01-01")
 ```
 
-### 第三步：同步日线数据
+### 第三步：同步行情数据（日线 / 5 分钟 / 1 分钟）
 
-支持多数据源容灾（akshare → baostock → tushare），增量更新模式。
+**拉取优先级**：`mootdx`（通达信本地盘）→ `akshare` → `baostock` → `tushare`。
+增量更新**优先 akshare**，且 akshare 内部二次容灾（东财 → 新浪 → 腾讯）。
+
+落盘只保留三套原始周期：`data_store/daily`、`data_store/min5`、`data_store/min1`。
+其余周期**按需在加载时生成、不落盘**：
+
+- 周/月/季/年线由**日线** resample；
+- 15/30/60 分钟由 **5 分钟**生成；其它分钟周期由 **1 分钟**生成。
 
 ```bash
-# 更新全部股票数据
-python src/main.py fetch
+# 数据源连通性自测（先跑这个确认各源可用）
+python -m src.data.fetcher --selftest
 
-# 更新指定股票
-python src/main.py fetch --codes 000001.SZ,600519.SH
+# 全市场增量更新（默认日线 + 5分钟 + 1分钟）
+python -m src.data.fetcher
+
+# 指定股票 / 指定周期
+python -m src.data.fetcher --codes 000001.SZ 600519.SH 920819.BJ
+python -m src.data.fetcher --codes 000001.SZ --freqs daily min5
 ```
+
+```python
+from src.data import DataFetcher
+
+f = DataFetcher()                       # 自动寻径通达信目录，或在 config 设 data.tdx_path
+f.update(["000001.SZ"])                 # 日线+5min+1min 增量
+daily = f.load_daily("000001.SZ", "2024-01-01", "2024-12-31")
+weekly = f.load_daily("000001.SZ", "2024-01-01", "2024-12-31", period="weekly")
+m15 = f.load_minute("000001.SZ", "15", "2024-06-01", "2024-06-30")  # 由 5min resample
+```
+
+> ⚠️ **首次使用强烈建议先下载通达信本地数据，避免触发东财风控**
+>
+> 1. **优先方案（推荐）**：安装通达信客户端，下载并解压「沪深京日线 + 5 分钟 + 1 分钟
+>    完整包」（见 https://www.tdx.com.cn/article/vipdata.html），按说明覆盖到
+>    `{通达信目录}/vipdoc`。**盘后**首次全量读取完全走本地、零网络风控。
+>    本系统会用本地 lday/fzline/minline 生成所有更高周期。
+> 2. **备选方案**：订阅 **Tushare**（填 `TUSHARE_TOKEN`）用于初次拉取，配额稳定、抗风控。
+> 3. 若直接用 akshare 首拉全市场，请保留默认的 `--throttle` 与年分片防风控，并尽量在盘后运行。
+
+### 复权因子（统一拉取）
+
+所有数据源只返回**不复权 OHLCV**，复权因子由系统**统一**按股票拉取一次，并以同一张
+「日期→累计后复权因子」表**同时作用于日线和分钟线**（按日期对齐），保证多周期一致。
+因子源容灾：新浪 `hfq-factor` → tushare `adj_factor` → 东财后复权/不复权比值。
+落盘 OHLC 为后复权价，`adj_factor` 为累计因子，回测可直接用 `close`。
+
+### 代理说明（重要）
+
+本系统**不再自动绕过/设置系统代理**。若运行时报「代理错误 / ProxyError / 无法连接到代理」，
+说明你的系统代理或 VPN/加速器不可达，请执行任一操作后重试：
+
+1. **关闭** Windows 系统代理 / VPN / 加速器；
+2. 或运行前设置环境变量直连：
+   - PowerShell：`$env:NO_PROXY="*"`
+   - cmd：`set NO_PROXY=*`
+
+发生代理类错误时程序会抛出 `ProxyConfigError` 并打印上述处置提示。
 
 ## A股回测避坑专栏
 

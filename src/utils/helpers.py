@@ -267,7 +267,7 @@ def format_code(code: str) -> str:
         if code.startswith(("43", "83", "87", "88", "92")):
             return code + ".BJ"
         # 深交所
-        if code.startswith(("000", "001", "002", "003", "300", "301", "200")):
+        if code.startswith(("000", "001", "002", "003", "300", "301", "302","200")):
             return code + ".SZ"
         # 其它 4/8 开头：保守归北交所（原新三板大多已退市/转板）
         if code.startswith(("4", "8")):
