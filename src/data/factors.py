@@ -17,9 +17,9 @@
 新架构下原始价与因子**分离落盘**，因子表每次刷新直接覆盖即可，因此**不再需要**
 旧版的"零容差因子自愈"。本类只负责"取到最新的累计因子表"。
 
-未来自算因子（点2）：可新增 ``FactorCalculator``（由通达信 gbbq 等公司行为事件
-按复权公式累乘），产出**同一张** ``DataFrame[date, cum_factor]``，与外部源互验，
-下游 ``adjust`` 无感知。当前先不实现自算公式，仅保留扩展点。
+自算因子：``FactorCalculator``（见本文件下方）由通达信 gbbq 除权除息事件 + 本地不复权
+收盘价按复权公式累乘，产出**同一张** ``DataFrame[date, cum_factor]``，下游 ``adjust``
+无感知。完全离线、零网络请求，可作为可选因子源或与外部源互验。
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import os
 import random
 import threading
 import time
-from typing import Dict
+from typing import Callable, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -166,3 +166,112 @@ class FactorProvider:
             1.0,
         )
         return m[["date", "cum_factor"]].dropna()
+
+
+class FactorCalculator:
+    """由通达信 ``gbbq`` 除权除息事件 + 本地不复权收盘价**自算**累计后复权因子。
+
+    与 ``FactorProvider`` 同接口（``get_factor(code) -> DataFrame[date, cum_factor]``）、
+    同 schema，可作为下游无感知的可选因子源（完全离线，零网络请求）。
+
+    刻度约定
+    --------
+    以**最早一个交易日**为基准 ``cum_factor = 1.0``；每遇一个除权除息日 ``D``，按
+
+        除权参考价 ex = (前收盘 - 每股现金分红 + 每股配股×配股价) / (1 + 每股送转 + 每股配股)
+        当日因子增量 = 前收盘 / ex
+        cum_factor(D) = cum_factor(D⁻) × (前收盘 / ex)
+
+    累乘。产出只含**变化点**（基准日 + 各除权日）的稀疏因子表，非除权日由
+    ``adjust.align_cum_factor`` 的 backward 对齐自动向后填充，结果与逐日表等价。
+
+    与外部源（sina/tushare）的**绝对刻度可能不同**（基准取最早日=1.0），但任意两日之间
+    的比值一致，故 hfq 收益序列等价。
+    """
+
+    def __init__(
+        self,
+        gbbq_store,
+        raw_close_loader: Callable[[str], Optional[pd.DataFrame]],
+    ) -> None:
+        """
+        Args:
+            gbbq_store: ``src.data.gbbq.GbbqStore`` 实例（提供 ``events(code)``）。
+            raw_close_loader: ``code -> DataFrame[date, close]``（**不复权**日线，可含其它列）。
+        """
+        self._gbbq = gbbq_store
+        self._load_raw = raw_close_loader
+        self._cache: Dict[str, pd.DataFrame] = {}
+        self._lock = threading.Lock()
+        self._code_locks: Dict[str, threading.Lock] = {}
+
+    def _code_lock(self, code: str) -> threading.Lock:
+        with self._lock:
+            lk = self._code_locks.get(code)
+            if lk is None:
+                lk = threading.Lock()
+                self._code_locks[code] = lk
+            return lk
+
+    def get_factor(self, code: str) -> pd.DataFrame:
+        """返回 DataFrame[date, cum_factor]（按 date 升序）；无原始价/无事件返回空表。"""
+        std = format_code(code)
+        if std in self._cache:
+            return self._cache[std]
+        with self._code_lock(std):
+            if std in self._cache:
+                return self._cache[std]
+            raw = self._load_raw(std)
+            events = self._gbbq.events(std)
+            df = self._compute(raw, events)
+            if df is not None and not df.empty:
+                self._cache[std] = df
+            return df
+
+    @staticmethod
+    def _compute(raw: Optional[pd.DataFrame], events: pd.DataFrame) -> pd.DataFrame:
+        empty = pd.DataFrame(columns=list(FACTOR_COLUMNS.keys()))
+        if raw is None or raw.empty or "close" not in raw.columns or "date" not in raw.columns:
+            return empty
+        r = raw[["date", "close"]].copy()
+        r["date"] = pd.to_datetime(r["date"]).dt.normalize()
+        r["close"] = pd.to_numeric(r["close"], errors="coerce")
+        r = r.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
+        if r.empty:
+            return empty
+
+        closes = r.set_index("date")["close"]
+        # 基准行：最早一日 cum_factor = 1.0
+        rows = [(r["date"].iloc[0], 1.0)]
+        cum = 1.0
+
+        if events is not None and not events.empty:
+            ev = events.sort_values("date")
+            for _, row in ev.iterrows():
+                d = pd.Timestamp(row["date"]).normalize()
+                prior = closes[closes.index < d]
+                if prior.empty:
+                    continue  # 除权日早于本地最早行情，无前收可用，跳过
+                p_prev = float(prior.iloc[-1])
+                if p_prev <= 0:
+                    continue
+                div = float(row.get("fenhong", 0.0)) / 10.0   # 每股现金分红
+                song = float(row.get("song", 0.0)) / 10.0     # 每股送转
+                pei = float(row.get("pei", 0.0)) / 10.0       # 每股配股
+                peijia = float(row.get("peijia", 0.0))        # 配股价
+                denom = 1.0 + song + pei
+                if denom <= 0:
+                    continue
+                ex = (p_prev - div + pei * peijia) / denom
+                if ex <= 0:
+                    continue
+                cum *= p_prev / ex
+                rows.append((d, cum))
+
+        out = pd.DataFrame(rows, columns=["date", "cum_factor"])
+        out = (
+            out.drop_duplicates(subset=["date"], keep="last")
+            .sort_values("date")
+            .reset_index(drop=True)
+        )
+        return out

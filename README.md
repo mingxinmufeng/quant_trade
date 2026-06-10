@@ -94,7 +94,7 @@ stocks = universe.get_tradable_stocks("2024-01-01")
 
 ### 第三步：同步行情数据（日线 / 5 分钟 / 1 分钟）
 
-**拉取优先级**：`mootdx`（通达信本地盘）→ `akshare` → `baostock` → `tushare`。
+**拉取优先级**：`pytdx`（通达信本地盘）→ `akshare` → `baostock` → `tushare`。
 增量更新**优先 akshare**，且 akshare 内部二次容灾（东财 → 新浪 → 腾讯）。
 
 落盘只保留三套原始周期：`data_store/daily`、`data_store/min5`、`data_store/min1`。

@@ -3,7 +3,7 @@
 
 公开：
     DataSourceBase / DataFetchError / ProxyConfigError
-    MootdxLocalSource / AkshareSource / BaostockSource / TushareSource
+    PytdxLocalSource / AkshareSource / BaostockSource / TushareSource
     build_source(name, ...) 工厂
     DEFAULT_SOURCES 默认优先级
 """
@@ -22,15 +22,15 @@ from .base import (
     _raise_if_proxy_error,
 )
 from .baostock_source import BaostockSource
-from .mootdx_source import (
-    MootdxLocalSource,
+from .pytdx_source import (
+    PytdxLocalSource,
     _auto_discover_tdx_path,
-    _build_bj_reader,
+    _build_daily_reader,
 )
 from .tushare_source import TushareSource
 
 #: 默认数据源优先级
-DEFAULT_SOURCES = ("mootdx", "akshare", "baostock", "tushare")
+DEFAULT_SOURCES = ("pytdx", "akshare", "baostock", "tushare")
 
 
 def build_source(
@@ -43,9 +43,9 @@ def build_source(
         return BaostockSource()
     if name == "tushare":
         return TushareSource()
-    if name == "mootdx":
-        return MootdxLocalSource(tdx_path=tdx_path)
-    raise ValueError(f"未知数据源: {name}（支持 mootdx/akshare/baostock/tushare）")
+    if name == "pytdx":
+        return PytdxLocalSource(tdx_path=tdx_path)
+    raise ValueError(f"未知数据源: {name}（支持 pytdx/akshare/baostock/tushare）")
 
 
 __all__ = [
@@ -54,13 +54,13 @@ __all__ = [
     "BaostockSource",
     "DataFetchError",
     "DataSourceBase",
-    "MootdxLocalSource",
+    "PytdxLocalSource",
     "ProxyConfigError",
     "TushareSource",
     "build_source",
     "_ak_call",
     "_auto_discover_tdx_path",
-    "_build_bj_reader",
+    "_build_daily_reader",
     "_is_proxy_error",
     "_raise_if_proxy_error",
 ]

@@ -102,3 +102,21 @@ models/
 # Local configuration overrides
 config.local.yaml
 config_override.yaml
+config.private.yaml
+
+# Temporary test scripts and outputs (root level)
+*_test_output.txt
+*_explore.txt
+gbbq_*.txt
+# Generic patterns for root-level temp scripts
+test_*.py
+fetch_*.py
+
+# Temporary scripts and cache
+scripts/cache/
+scripts/crosscheck_factors.py
+scripts/fetch_suspend_today.py
+scripts/test_tushare_suspend.py
+
+# Dockerfile (environment-specific)
+Dockerfile

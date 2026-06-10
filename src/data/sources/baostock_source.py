@@ -17,7 +17,7 @@ class BaostockSource(DataSourceBase):
 
     **线程安全**：baostock 基于进程级全局 socket，并发查询会串扰；故所有
     登录/查询都串行化到一把类级锁 ``_LOCK`` 上（多线程更新时 baostock 退化为
-    串行，但它仅作为 mootdx/akshare 失败后的兜底源，命中率低，影响可忽略）。
+    串行，但它仅作为 pytdx/akshare 失败后的兜底源，命中率低，影响可忽略）。
     """
 
     name = "baostock"

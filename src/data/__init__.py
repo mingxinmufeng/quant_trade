@@ -8,11 +8,16 @@
     adjust            按需复权（none/hfq/qfq + anchor_date）
     resample          周期重采样
     storage           本地仓库（原始/因子分离落盘 + hfq 缓存）
+    processor         清洗 / 交易日历对齐 / 面板对齐 / 复权·重采样编排
+    universe          动态股票池（防幸存者偏差）
     fetcher           编排：采集不复权原始数据 + 刷新因子表
 """
 
 from .adjust import apply_adjust, cum_factor_at
-from .factors import FactorProvider
+from .factors import FactorCalculator, FactorProvider
+from .gbbq import GbbqStore
+from .processor import DataProcessor
+from .universe import Universe
 from .fetcher import (
     DataFetcher,
     DataFetchError,
@@ -29,10 +34,14 @@ __all__ = [
     "MINUTE_COLUMNS",
     "DataFetchError",
     "DataFetcher",
+    "DataProcessor",
     "DataStore",
+    "FactorCalculator",
     "FactorProvider",
+    "GbbqStore",
     "ProxyConfigError",
     "TradingCalendar",
+    "Universe",
     "apply_adjust",
     "cum_factor_at",
     "resample_daily",

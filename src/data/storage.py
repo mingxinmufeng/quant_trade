@@ -9,8 +9,11 @@
     {store}/daily/{code}.parquet          # 不复权日线 OHLCV + 涨跌停/停牌/名称/来源
     {store}/min1/{code}.parquet           # 不复权 1 分钟 OHLCV
     {store}/min5/{code}.parquet           # 不复权 5 分钟 OHLCV
-    {store}/factors/{code}.parquet        # date → cum_factor（外部源，覆盖刷新）
-    {store}/adjusted/{freq}/{code}.parquet  # 后复权(hfq)缓存（按版本戳重算）
+    {store}/factors/{code}.parquet        # date → cum_factor（生效因子，覆盖刷新）
+    {store}/factors_gbbq/{code}.parquet   # date → cum_factor（gbbq 自算并存记录，供交叉对比）
+    {store}/gbbq_events.parquet           # 全市场权息事件快照（update 时按版本戳落盘）
+    {store}/adjusted/{freq}/{code}.parquet       # 后复权(hfq)缓存（生效因子，按版本戳重算）
+    {store}/adjusted_gbbq/{freq}/{code}.parquet  # 后复权(hfq)缓存（gbbq 因子口径，隔离）
 
 复权缓存策略（用户拍板）
 ------------------------
@@ -84,7 +87,11 @@ class DataStore:
         for d in self._dirs.values():
             ensure_dir(d)
         self._factor_dir = ensure_dir(self._store_path / "factors")
+        # gbbq 自算因子并存目录（与外部源 factors/ 互不覆盖，便于长期交叉对比）
+        self._factor_gbbq_dir = ensure_dir(self._store_path / "factors_gbbq")
         self._adjusted_dir = ensure_dir(self._store_path / "adjusted")
+        # gbbq 因子口径的 hfq 缓存（与 adjusted/ 隔离，避免两种因子来源互相污染缓存）
+        self._adjusted_gbbq_dir = ensure_dir(self._store_path / "adjusted_gbbq")
 
     # ------------------------------------------------------------
     # 路径
@@ -93,11 +100,33 @@ class DataStore:
     def freq_path(self, code: str, freq: str) -> Path:
         return self._dirs[freq] / f"{code}.parquet"
 
-    def factor_path(self, code: str) -> Path:
-        return self._factor_dir / f"{code}.parquet"
+    def factor_path(self, code: str, gbbq: bool = False) -> Path:
+        base = self._factor_gbbq_dir if gbbq else self._factor_dir
+        return base / f"{code}.parquet"
 
-    def adjusted_path(self, code: str, freq: str) -> Path:
-        return ensure_dir(self._adjusted_dir / freq) / f"{code}.parquet"
+    def adjusted_path(self, code: str, freq: str, gbbq: bool = False) -> Path:
+        base = self._adjusted_gbbq_dir if gbbq else self._adjusted_dir
+        return ensure_dir(base / freq) / f"{code}.parquet"
+
+    # ------------------------------------------------------------
+    # 生效因子选择（gbbq 口径优先用 factors_gbbq/，缺失则回退 factors/）
+    # ------------------------------------------------------------
+
+    def _effective_factor_path(self, code: str, use_gbbq: bool) -> Path:
+        """加载所用的因子文件路径：use_gbbq 且 factors_gbbq/ 有该股 → 用之，否则 factors/。"""
+        if use_gbbq:
+            p = self.factor_path(code, gbbq=True)
+            if p.exists():
+                return p
+        return self.factor_path(code, gbbq=False)
+
+    def _effective_factor(self, code: str, use_gbbq: bool) -> pd.DataFrame:
+        """加载所用的因子表（同上回退逻辑）。"""
+        if use_gbbq:
+            f = self.read_factor(code, gbbq=True)
+            if f is not None and not f.empty:
+                return f
+        return self.read_factor(code, gbbq=False)
 
     # ------------------------------------------------------------
     # 原始数据读写
@@ -128,8 +157,8 @@ class DataStore:
     # 因子读写
     # ------------------------------------------------------------
 
-    def read_factor(self, code: str) -> pd.DataFrame:
-        path = self.factor_path(code)
+    def read_factor(self, code: str, gbbq: bool = False) -> pd.DataFrame:
+        path = self.factor_path(code, gbbq=gbbq)
         if not path.exists():
             return pd.DataFrame(columns=list(FACTOR_COLUMNS.keys()))
         try:
@@ -141,11 +170,14 @@ class DataStore:
             logger.warning(f"读取因子文件 {path} 失败: {exc}")
             return pd.DataFrame(columns=list(FACTOR_COLUMNS.keys()))
 
-    def write_factor(self, code: str, df: pd.DataFrame) -> None:
-        """覆盖写因子表（新架构下因子直接刷新，无需自愈比对）。"""
+    def write_factor(self, code: str, df: pd.DataFrame, gbbq: bool = False) -> None:
+        """覆盖写因子表（新架构下因子直接刷新，无需自愈比对）。
+
+        ``gbbq=True`` 写入 ``factors_gbbq/``（gbbq 自算因子并存记录），否则写 ``factors/``（生效因子）。
+        """
         if df is None or df.empty:
             return
-        path = self.factor_path(code)
+        path = self.factor_path(code, gbbq=gbbq)
         ensure_dir(path.parent)
         out = df.copy()
         out["date"] = pd.to_datetime(out["date"]).dt.normalize()
@@ -157,44 +189,47 @@ class DataStore:
     # 复权加载（hfq 缓存 + qfq/none 派生）
     # ------------------------------------------------------------
 
-    def _hfq_cache_valid(self, code: str, freq: str) -> bool:
-        """hfq 缓存有效 ⇔ 缓存存在且其 mtime ≥ 原始与因子文件的 mtime。"""
-        cache = self.adjusted_path(code, freq)
+    def _hfq_cache_valid(self, code: str, freq: str, use_gbbq: bool = False) -> bool:
+        """hfq 缓存有效 ⇔ 缓存存在且其 mtime ≥ 原始与（生效）因子文件的 mtime。"""
+        cache = self.adjusted_path(code, freq, gbbq=use_gbbq)
         if not cache.exists():
             return False
         cache_mt = cache.stat().st_mtime
         raw = self.freq_path(code, freq)
         if raw.exists() and raw.stat().st_mtime > cache_mt:
             return False
-        factor = self.factor_path(code)
+        factor = self._effective_factor_path(code, use_gbbq)
         if factor.exists() and factor.stat().st_mtime > cache_mt:
             return False
         return True
 
-    def _build_hfq_cache(self, code: str, freq: str) -> Optional[pd.DataFrame]:
+    def _build_hfq_cache(self, code: str, freq: str, use_gbbq: bool = False) -> Optional[pd.DataFrame]:
         """重算并落盘 hfq 缓存；原始缺失返回 None。"""
         raw = self.read_raw(code, freq)
         if raw is None or raw.empty:
             return None
-        factor = self.read_factor(code)
+        factor = self._effective_factor(code, use_gbbq)
         hfq = apply_adjust(raw, factor, mode="hfq", time_col=_time_col(freq))
-        path = self.adjusted_path(code, freq)
+        path = self.adjusted_path(code, freq, gbbq=use_gbbq)
         ensure_dir(path.parent)
         hfq.to_parquet(path, index=False, compression="snappy")
-        logger.debug(f"[{code}|{freq}] 重算 hfq 缓存（{len(hfq)} 行）")
+        logger.debug(
+            f"[{code}|{freq}] 重算 hfq 缓存（{len(hfq)} 行"
+            f"{'，gbbq 口径' if use_gbbq else ''}）"
+        )
         return hfq
 
-    def get_hfq(self, code: str, freq: str) -> Optional[pd.DataFrame]:
+    def get_hfq(self, code: str, freq: str, use_gbbq: bool = False) -> Optional[pd.DataFrame]:
         """取后复权数据（命中有效缓存直接读，否则重算覆盖）。"""
-        if self._hfq_cache_valid(code, freq):
+        if self._hfq_cache_valid(code, freq, use_gbbq):
             try:
-                df = pd.read_parquet(self.adjusted_path(code, freq))
+                df = pd.read_parquet(self.adjusted_path(code, freq, gbbq=use_gbbq))
                 tc = _time_col(freq)
                 df[tc] = pd.to_datetime(df[tc])
                 return df.sort_values(tc).reset_index(drop=True)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[{code}|{freq}] 读 hfq 缓存失败，重算: {exc}")
-        return self._build_hfq_cache(code, freq)
+        return self._build_hfq_cache(code, freq, use_gbbq)
 
     def load(
         self,
@@ -203,12 +238,16 @@ class DataStore:
         adjust: str = "hfq",
         *,
         anchor_date: Optional[Union[str, date, datetime]] = None,
+        use_gbbq: bool = False,
     ) -> Optional[pd.DataFrame]:
         """加载某周期数据并按 ``adjust`` 复权。
 
         - ``none``：原始不复权。
         - ``hfq`` ：读/重算 hfq 缓存。
         - ``qfq`` ：hfq 除以锚点日累计因子（标量），现场派生不落缓存。
+
+        ``use_gbbq=True`` 用 gbbq 自算因子（``factors_gbbq/``）复权，缓存隔离在
+        ``adjusted_gbbq/``；该股无 gbbq 因子时回退到生效因子 ``factors/``。
         """
         mode = (adjust or "hfq").strip().lower()
         tc = _time_col(freq)
@@ -216,15 +255,15 @@ class DataStore:
             raw = self.read_raw(code, freq)
             if raw is None:
                 return None
-            return apply_adjust(raw, self.read_factor(code), mode="none", time_col=tc)
+            return apply_adjust(raw, self._effective_factor(code, use_gbbq), mode="none", time_col=tc)
 
-        hfq = self.get_hfq(code, freq)
+        hfq = self.get_hfq(code, freq, use_gbbq)
         if hfq is None:
             return None
         if mode == "hfq":
             return hfq
         if mode == "qfq":
-            anchor_f = cum_factor_at(self.read_factor(code), anchor_date)
+            anchor_f = cum_factor_at(self._effective_factor(code, use_gbbq), anchor_date)
             if not anchor_f or anchor_f == 1.0:
                 return hfq
             out = hfq.copy()

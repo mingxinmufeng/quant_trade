@@ -1,0 +1,497 @@
+"""
+回测主引擎 + 绩效评估（backtester）
+====================================
+
+把 数据 → 策略信号 → 撮合 → 持仓/资金 → 绩效 串成一条**防未来函数**的回测流水线。
+
+时序（核心）
+------------
+策略在 ``T`` 日收盘后产出信号矩阵；引擎在 **``T+1`` 日开盘**用 :class:`ExecutionEngine`
+撮合（默认 ``mode='next_open'``）。实现上：一次性生成全程信号矩阵（因子均为因果计算，
+``T`` 日信号只用 ``<=T`` 数据），日循环时**用上一交易日的信号**驱动当日撮合，从而强制
+T+1 滞后，杜绝未来函数。
+
+复权口径与分红送股
+------------------
+默认在 **hfq（后复权）** 价上回测：复权价已把送转/分红连续地折进价格，**无需**再对持仓
+股数/现金做除权调整（否则双重计提）。因此引擎默认 ``apply_corporate_actions=False``。
+仅当显式传入**不复权/前复权**数据时才应开启（用 :meth:`ExecutionEngine.apply_corporate_action`）。
+
+仓位规则（示例引擎的默认实现）
+------------------------------
+信号为方向（BUY/HOLD/SELL）。引擎采用**目标权重**建仓：``BUY`` 且未持仓 → 以
+``position_size``（默认取 ``risk.max_single_position``）× 当前总资产 估算目标市值买入；
+``SELL`` 且持仓 → 全部卖出；``HOLD`` 不动。每个交易日**先卖后买**以释放资金。
+
+绩效指标
+--------
+总/年化收益、夏普、最大回撤、Calmar、胜率、盈亏比、平均持仓天数、完整交易笔数，以及
+（提供基准时）基准收益、超额年化 alpha、beta。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional, Sequence, Union
+
+import numpy as np
+import pandas as pd
+from loguru import logger
+
+from ..strategy.base import BaseStrategy, Signal
+from ..utils.helpers import (
+    calculate_max_drawdown,
+    calculate_sharpe,
+    parse_date,
+    safe_divide,
+    truncate_to_100,
+)
+from .execution import ExecutionEngine, Order, OrderStatus
+from .portfolio import Portfolio
+
+__all__ = ["Trade", "BacktestResult", "Backtester"]
+
+#: 年交易日数
+TRADING_DAYS_PER_YEAR = 252
+
+#: 撮合 bar 需要的列
+_BAR_COLS = ("open", "high", "low", "close", "volume", "limit_up", "limit_down", "is_suspended", "adj_factor")
+
+
+@dataclass
+class Trade:
+    """一笔完整交易（一买一卖，均价法）。"""
+
+    code: str
+    entry_date: Optional[date]
+    exit_date: Optional[date]
+    entry_price: float
+    exit_price: float
+    shares: int
+    pnl: float           # 绝对盈亏（元，净额）
+    pnl_pct: float       # 收益率
+    holding_days: int
+
+
+@dataclass
+class BacktestResult:
+    """回测结果与绩效指标。"""
+
+    # 收益指标
+    total_return: float
+    annual_return: float
+    sharpe_ratio: float
+    max_drawdown: float
+    calmar_ratio: float
+    # 交易统计
+    win_rate: float
+    profit_loss_ratio: float
+    avg_holding_days: float
+    total_trades: int
+    # 基准对比
+    benchmark_return: float
+    alpha: float
+    beta: float
+    # 明细
+    equity_curve: pd.Series
+    trades: List[Trade]
+    daily_positions: pd.DataFrame
+
+    def summary(self) -> str:
+        """单行可读摘要。"""
+        return (
+            f"总收益 {self.total_return:+.2%} | 年化 {self.annual_return:+.2%} | "
+            f"夏普 {self.sharpe_ratio:.2f} | 回撤 {self.max_drawdown:.2%} | "
+            f"Calmar {self.calmar_ratio:.2f} | 胜率 {self.win_rate:.2%} | "
+            f"盈亏比 {self.profit_loss_ratio:.2f} | 交易 {self.total_trades} 笔 | "
+            f"超额 {self.alpha:+.2%} beta {self.beta:.2f}"
+        )
+
+
+class Backtester:
+    """回测主引擎。
+
+    Args:
+        config: 全局配置（读取 ``backtest`` / ``execution`` / ``risk``）；可为 None 用默认。
+        execution: 撮合引擎实例；None 时按 config 构造。
+        calendar: 交易日历（用于确定交易日序列）；None 时由数据日期推断。
+        fetcher: 数据源（需有 ``load_batch``）；当 :meth:`run` 未直接传 data 时使用。
+        risk_manager: 风控（传给撮合引擎计算费用；可选）。
+        position_size: 单票目标权重；None 时取 ``risk.max_single_position`` 或 0.2。
+        apply_corporate_actions: 是否对持仓做除权调整（仅非复权/前复权数据下开启）。
+    """
+
+    def __init__(
+        self,
+        config: Any = None,
+        execution: Optional[ExecutionEngine] = None,
+        calendar: Any = None,
+        fetcher: Any = None,
+        risk_manager: Optional[Any] = None,
+        position_size: Optional[float] = None,
+        apply_corporate_actions: bool = False,
+    ) -> None:
+        self.config = config
+        self.calendar = calendar
+        self.fetcher = fetcher
+        self.risk_manager = risk_manager
+        self.execution = execution or ExecutionEngine.from_config(config or {}, risk_manager)
+        self.apply_corporate_actions = bool(apply_corporate_actions)
+
+        bt = _section(config, "backtest")
+        rk = _section(config, "risk")
+        self.initial_capital = float(_get(bt, "initial_capital", 1_000_000))
+        self.risk_free_rate = float(_get(bt, "risk_free_rate", 0.025))
+        self.benchmark_code = _get(bt, "benchmark", "000300.SH")
+        ex = _section(config, "execution")
+        self.t1_cash_freeze = bool(_get(ex, "t1_cash_freeze", True))
+        self.position_size = float(
+            position_size if position_size is not None else _get(rk, "max_single_position", 0.20)
+        )
+
+    # ------------------------------------------------------------
+    # 主入口
+    # ------------------------------------------------------------
+
+    def run(
+        self,
+        strategy: BaseStrategy,
+        start: Union[str, date, datetime],
+        end: Union[str, date, datetime],
+        data: Optional[Dict[str, pd.DataFrame]] = None,
+        codes: Optional[Sequence[str]] = None,
+        benchmark: Optional[pd.Series] = None,
+    ) -> BacktestResult:
+        """运行回测。
+
+        Args:
+            strategy: 策略实例。
+            start/end: 回测区间（含）。
+            data: 预加载的 ``{code: 日线df}``（含 date 列，建议 hfq）；None 时用 fetcher 拉取。
+            codes: data 为 None 时，要回测的股票池。
+            benchmark: 基准日收盘 Series（index=date）；None 时基准指标为 0。
+
+        Returns:
+            :class:`BacktestResult`。
+        """
+        s, e = parse_date(start), parse_date(end)
+        if data is None:
+            data = self._load_data(codes, s, e)
+        data = self._prepare_data(data, s, e)
+        if not data:
+            logger.warning("回测数据为空，返回空结果")
+            return self._empty_result()
+
+        trading_days = self._trading_days(data, s, e)
+        if len(trading_days) < 2:
+            logger.warning("可用交易日不足 2 天，返回空结果")
+            return self._empty_result()
+
+        # 全程信号矩阵（因果），用上一交易日信号驱动当日撮合（T+1）
+        signals = strategy.generate_signals(data)
+        signals = self._align_signals(signals, trading_days, list(data.keys()))
+
+        # 每只股票按日期建索引，便于 O(1) 取 bar
+        indexed = {code: df.set_index("date") for code, df in data.items()}
+
+        pf = Portfolio(self.initial_capital, t1_cash_freeze=self.t1_cash_freeze)
+        equity_dates: List[date] = []
+        equity_values: List[float] = []
+        positions_log: List[Dict[str, int]] = []
+
+        for i, day in enumerate(trading_days):
+            pf.settle_new_day()  # 解冻 T+1
+
+            if self.apply_corporate_actions and i > 0:
+                self._handle_corporate_actions(pf, indexed, trading_days[i - 1], day)
+
+            if i > 0:
+                signal_day = trading_days[i - 1]      # T：上一交易日信号
+                self._execute_day(pf, signals, indexed, signal_day, day)
+
+            # 收盘估值
+            pf.mark_to_market(self._close_prices(indexed, day))
+            equity_dates.append(day)
+            equity_values.append(pf.total_value)
+            positions_log.append(pf.position_shares())
+
+        equity_curve = pd.Series(equity_values, index=pd.DatetimeIndex(equity_dates), dtype="float64")
+        equity_curve.index.name = "date"
+        equity_curve = equity_curve / self.initial_capital   # 归一，初始=1.0
+
+        trades = [Trade(**t) for t in pf.realized_trades]
+        daily_positions = self._positions_frame(equity_dates, positions_log)
+
+        result = self._compute_metrics(equity_curve, trades, daily_positions, benchmark)
+        logger.info(f"回测完成 | {strategy.strategy_name} | {result.summary()}")
+        return result
+
+    # ------------------------------------------------------------
+    # 数据准备
+    # ------------------------------------------------------------
+
+    def _load_data(self, codes: Optional[Sequence[str]], s: date, e: date) -> Dict[str, pd.DataFrame]:
+        if self.fetcher is None or not codes:
+            raise ValueError("run() 未提供 data，且 fetcher/codes 不足以加载数据")
+        logger.info(f"通过 fetcher 加载 {len(codes)} 只股票 {s}~{e} 数据（hfq）")
+        return self.fetcher.load_batch(list(codes), s, e, adjust="hfq")
+
+    @staticmethod
+    def _prepare_data(data: Dict[str, pd.DataFrame], s: date, e: date) -> Dict[str, pd.DataFrame]:
+        """裁剪区间、规整 date、剔除空表。"""
+        out: Dict[str, pd.DataFrame] = {}
+        ts, te = pd.Timestamp(s), pd.Timestamp(e)
+        for code, df in data.items():
+            if df is None or df.empty or "date" not in df.columns or "close" not in df.columns:
+                continue
+            d = df.copy()
+            d["date"] = pd.to_datetime(d["date"]).dt.normalize()
+            d = d[(d["date"] >= ts) & (d["date"] <= te)]
+            if d.empty:
+                continue
+            d = d.drop_duplicates(subset=["date"], keep="last").sort_values("date").reset_index(drop=True)
+            if "is_suspended" not in d.columns:
+                d["is_suspended"] = False
+            out[code] = d
+        return out
+
+    def _trading_days(self, data: Dict[str, pd.DataFrame], s: date, e: date) -> List[pd.Timestamp]:
+        if self.calendar is not None:
+            return [pd.Timestamp(d) for d in self.calendar.get_trading_days(s, e)]
+        # 退化：用全部数据日期并集
+        all_dates = pd.DatetimeIndex(
+            np.concatenate([df["date"].to_numpy() for df in data.values()])
+        )
+        return list(all_dates.normalize().unique().sort_values())
+
+    @staticmethod
+    def _align_signals(signals: pd.DataFrame, days: List[pd.Timestamp], codes: List[str]) -> pd.DataFrame:
+        if signals is None or signals.empty:
+            return pd.DataFrame(int(Signal.HOLD), index=pd.DatetimeIndex(days), columns=codes, dtype="int64")
+        sig = signals.copy()
+        sig.index = pd.DatetimeIndex(pd.to_datetime(sig.index)).normalize()
+        sig = sig.reindex(index=pd.DatetimeIndex(days), columns=codes).fillna(int(Signal.HOLD))
+        return sig.astype("int64")
+
+    # ------------------------------------------------------------
+    # 日内撮合
+    # ------------------------------------------------------------
+
+    def _execute_day(self, pf, signals, indexed, signal_day, exec_day) -> None:
+        try:
+            row = signals.loc[signal_day]
+        except KeyError:
+            return
+        sells = [c for c in signals.columns if int(row.get(c, 0)) == int(Signal.SELL) and pf.has_position(c)]
+        buys = [c for c in signals.columns if int(row.get(c, 0)) == int(Signal.BUY)]
+
+        # 先卖后买，释放资金
+        for code in sells:
+            bar = self._bar(indexed, code, exec_day)
+            if bar is None:
+                continue
+            pos = pf.get_position(code)
+            order = Order(code=code, direction=int(Signal.SELL), shares=pos.shares, trade_date=exec_day.date())
+            self.execution.match(order, bar, pf)
+
+        for code in buys:
+            if pf.has_position(code):
+                continue  # 已持仓不加仓（示例规则）
+            bar = self._bar(indexed, code, exec_day)
+            if bar is None:
+                continue
+            base = bar.get("open")
+            if base is None or float(base) != float(base) or float(base) <= 0:
+                continue
+            target_value = pf.total_value * self.position_size
+            shares = truncate_to_100(int(target_value / float(base)))
+            if shares < 100:
+                continue
+            order = Order(code=code, direction=int(Signal.BUY), shares=shares, trade_date=exec_day.date())
+            self.execution.match(order, bar, pf)
+
+    @staticmethod
+    def _bar(indexed: Dict[str, pd.DataFrame], code: str, day: pd.Timestamp) -> Optional[Dict[str, Any]]:
+        df = indexed.get(code)
+        if df is None or day not in df.index:
+            return None
+        row = df.loc[day]
+        if isinstance(row, pd.DataFrame):  # 重复索引兜底
+            row = row.iloc[-1]
+        bar: Dict[str, Any] = {"date": day.date()}
+        for c in _BAR_COLS:
+            bar[c] = row[c] if c in row.index else (False if c == "is_suspended" else np.nan)
+        return bar
+
+    @staticmethod
+    def _close_prices(indexed: Dict[str, pd.DataFrame], day: pd.Timestamp) -> Dict[str, float]:
+        out: Dict[str, float] = {}
+        for code, df in indexed.items():
+            if day in df.index:
+                row = df.loc[day]
+                if isinstance(row, pd.DataFrame):
+                    row = row.iloc[-1]
+                out[code] = row["close"]
+        return out
+
+    def _handle_corporate_actions(self, pf, indexed, prev_day, day) -> None:
+        """非复权/前复权模式下，按 adj_factor 变化率对持仓做除权调整。"""
+        for code in list(pf.positions.keys()):
+            df = indexed.get(code)
+            if df is None or day not in df.index or prev_day not in df.index:
+                continue
+            if "adj_factor" not in df.columns:
+                continue
+            ratio = ExecutionEngine.detect_ex_factor_ratio(df.loc[prev_day, "adj_factor"], df.loc[day, "adj_factor"])
+            if ratio > 1.001:
+                self.execution.apply_corporate_action(pf, code, ratio)
+
+    # ------------------------------------------------------------
+    # 结果组装
+    # ------------------------------------------------------------
+
+    @staticmethod
+    def _positions_frame(dates: List[date], logs: List[Dict[str, int]]) -> pd.DataFrame:
+        all_codes = sorted({c for d in logs for c in d})
+        frame = pd.DataFrame(0, index=pd.DatetimeIndex(dates), columns=all_codes, dtype="int64")
+        frame.index.name = "date"
+        for i, d in enumerate(dates):
+            for code, sh in logs[i].items():
+                frame.iat[i, frame.columns.get_loc(code)] = sh
+        return frame
+
+    def _compute_metrics(
+        self,
+        equity_curve: pd.Series,
+        trades: List[Trade],
+        daily_positions: pd.DataFrame,
+        benchmark: Optional[pd.Series],
+    ) -> BacktestResult:
+        eq = equity_curve.to_numpy(dtype="float64")
+        returns = pd.Series(eq).pct_change().dropna()
+        n_periods = max(1, len(eq) - 1)
+
+        total_return = float(eq[-1] - 1.0)
+        annual_return = float((eq[-1]) ** (TRADING_DAYS_PER_YEAR / n_periods) - 1.0) if eq[-1] > 0 else -1.0
+        sharpe = calculate_sharpe(returns.tolist(), self.risk_free_rate, TRADING_DAYS_PER_YEAR)
+        mdd = calculate_max_drawdown(eq.tolist())
+        calmar = safe_divide(annual_return, abs(mdd), 0.0)
+
+        # 交易统计
+        total_trades = len(trades)
+        wins = [t for t in trades if t.pnl > 0]
+        losses = [t for t in trades if t.pnl < 0]
+        win_rate = safe_divide(len(wins), total_trades, 0.0)
+        avg_win = np.mean([t.pnl for t in wins]) if wins else 0.0
+        avg_loss = np.mean([t.pnl for t in losses]) if losses else 0.0
+        profit_loss_ratio = safe_divide(avg_win, abs(avg_loss), 0.0)
+        avg_holding_days = float(np.mean([t.holding_days for t in trades])) if trades else 0.0
+
+        # 基准
+        benchmark_return, alpha, beta = self._benchmark_metrics(equity_curve, returns, annual_return, benchmark)
+
+        return BacktestResult(
+            total_return=total_return,
+            annual_return=annual_return,
+            sharpe_ratio=sharpe,
+            max_drawdown=mdd,
+            calmar_ratio=calmar,
+            win_rate=win_rate,
+            profit_loss_ratio=profit_loss_ratio,
+            avg_holding_days=avg_holding_days,
+            total_trades=total_trades,
+            benchmark_return=benchmark_return,
+            alpha=alpha,
+            beta=beta,
+            equity_curve=equity_curve,
+            trades=trades,
+            daily_positions=daily_positions,
+        )
+
+    def _benchmark_metrics(self, equity_curve, strat_returns, annual_return, benchmark):
+        if benchmark is None or len(benchmark) < 2:
+            return 0.0, 0.0, 0.0
+        b = benchmark.copy()
+        b.index = pd.DatetimeIndex(pd.to_datetime(b.index)).normalize()
+        b = b.reindex(equity_curve.index).ffill().dropna()
+        if len(b) < 2:
+            return 0.0, 0.0, 0.0
+        bench_return = float(b.iloc[-1] / b.iloc[0] - 1.0)
+        n = max(1, len(b) - 1)
+        bench_annual = float((1 + bench_return) ** (TRADING_DAYS_PER_YEAR / n) - 1.0)
+        bench_ret = b.pct_change().dropna()
+        # 对齐两条日收益
+        aligned = pd.concat([strat_returns.reset_index(drop=True), bench_ret.reset_index(drop=True)], axis=1).dropna()
+        beta = 0.0
+        if len(aligned) >= 2:
+            sr, br = aligned.iloc[:, 0].to_numpy(), aligned.iloc[:, 1].to_numpy()
+            var_b = float(np.var(br, ddof=1))
+            beta = float(np.cov(sr, br, ddof=1)[0, 1] / var_b) if var_b > 0 else 0.0
+        alpha = float(annual_return - bench_annual)   # 超额年化
+        return bench_return, alpha, beta
+
+    def _empty_result(self) -> BacktestResult:
+        return BacktestResult(
+            total_return=0.0, annual_return=0.0, sharpe_ratio=0.0, max_drawdown=0.0,
+            calmar_ratio=0.0, win_rate=0.0, profit_loss_ratio=0.0, avg_holding_days=0.0,
+            total_trades=0, benchmark_return=0.0, alpha=0.0, beta=0.0,
+            equity_curve=pd.Series(dtype="float64"), trades=[],
+            daily_positions=pd.DataFrame(),
+        )
+
+
+# ============================================================
+# 配置辅助
+# ============================================================
+
+
+def _section(cfg: Any, key: str) -> Any:
+    if cfg is None:
+        return {}
+    if hasattr(cfg, "get"):
+        sub = cfg.get(key)
+        if sub is not None:
+            return sub
+    return cfg
+
+
+def _get(cfg: Any, key: str, default: Any) -> Any:
+    if cfg is None:
+        return default
+    if hasattr(cfg, "get"):
+        val = cfg.get(key, default)
+        return default if val is None else val
+    return getattr(cfg, key, default)
+
+
+# ============================================================
+# 模块自测  python -m src.engine.backtester
+# ============================================================
+
+if __name__ == "__main__":
+    from ..strategy.examples.ma_rsi import MaRsiStrategy
+    from ..utils.helpers import init_logging
+
+    init_logging(level="INFO")
+    rng = np.random.RandomState(1)
+    n = 150
+    dates = pd.date_range("2024-01-01", periods=n, freq="B")
+
+    def _mk(seed_shift):
+        trend = np.concatenate([np.linspace(20, 14, n // 2), np.linspace(14, 28, n - n // 2)]) + seed_shift
+        close = pd.Series(trend + rng.randn(n) * 0.3).clip(lower=1.0)
+        return pd.DataFrame({
+            "date": dates, "open": close.shift(1).fillna(close.iloc[0]),
+            "high": close * 1.03, "low": close * 0.97, "close": close,
+            "volume": pd.Series(rng.randint(int(5e6), int(1e7), n)).astype("float64"),
+            "limit_up": close * 1.1, "limit_down": close * 0.9, "is_suspended": False,
+        })
+
+    data = {"000001.SZ": _mk(0.0), "600519.SH": _mk(2.0)}
+    bench = pd.Series(np.linspace(1.0, 1.1, n) * 3000, index=dates)
+
+    bt = Backtester(config={"backtest": {"initial_capital": 1_000_000}}, position_size=0.4)
+    res = bt.run(MaRsiStrategy(fast_period=5, slow_period=20), "2024-01-01", "2024-08-01", data=data, benchmark=bench)
+    logger.info(res.summary())
+    logger.info(f"净值点数={len(res.equity_curve)} 交易={res.total_trades} 持仓表 shape={res.daily_positions.shape}")
