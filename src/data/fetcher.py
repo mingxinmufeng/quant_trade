@@ -87,8 +87,8 @@ from .trading_calendar import TradingCalendar
 DEFAULT_RETRY_TIMES = 3
 DEFAULT_RETRY_DELAYS: Sequence[float] = (1, 2, 4, 8)
 
-#: 默认并行线程数（按股票并行；IO 密集，>1 即可显著提速）
-DEFAULT_MAX_WORKERS = 4
+#: 默认并行线程数（按股票并行；pytdx 为本地文件 IO，可用更多线程）
+DEFAULT_MAX_WORKERS = 16
 
 #: A 股最早可拉取日期
 EARLIEST_DATE = date(1990, 12, 19)
@@ -211,6 +211,8 @@ class DataFetcher:
         # 多线程：保护源懒构建与股票名称表的并发初始化
         self._source_lock = threading.Lock()
         self._name_lock = threading.Lock()
+        # update() 时预热：全市场 gbbq 最近除权除息日字典（避免逐股 O(N) 过滤）
+        self._gbbq_event_cache: Dict[str, Optional[pd.Timestamp]] = {}
 
     def _resolve_use_gbbq(self, factor_source: Optional[str]) -> bool:
         """解析加载所用因子口径：None→实例默认；'gbbq'→True，其余→False。"""
@@ -225,7 +227,7 @@ class DataFetcher:
         self,
         codes: Optional[Sequence[str]] = None,
         freqs: Sequence[str] = ("daily", "min5", "min1"),
-        throttle: float = 0.3,
+        throttle: float = 0.0,
         progress_every: int = 200,
         max_workers: Optional[int] = None,
     ) -> None:
@@ -234,7 +236,7 @@ class DataFetcher:
         Args:
             codes: 股票代码列表；None=更新本地 daily 目录已存在的全部股票。
             freqs: 要更新的周期子集。
-            throttle: 每只股票处理完 sleep 秒数（防风控）。
+            throttle: 每只股票处理完 sleep 秒数（防网络源风控；pytdx 本地源设 0 即可）。
             progress_every: 进度打印间隔。
             max_workers: 并行线程数；None=用实例默认。
         """
@@ -271,6 +273,10 @@ class DataFetcher:
                 self._gbbq.save_snapshot()
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"gbbq 事件快照写盘跳过: {exc}")
+            # 预热全市场除权除息日字典（一次 groupby，_should_skip_factor 走 O(1) 缓存）
+            self._prewarm_gbbq_event_cache()
+        # 预热停牌名单（lookback 窗口内交易日批量预取，消除多线程竞争）
+        self._prewarm_suspend_cache()
 
         success, fail = 0, 0
         with Timer("数据更新"):
@@ -326,6 +332,36 @@ class DataFetcher:
             time.sleep(throttle + (random.uniform(0, self._jitter) if self._jitter else 0))
         return ok
 
+    def _prewarm_suspend_cache(self) -> None:
+        """预热停牌名单缓存（lookback 窗口内所有交易日串行预取）。
+
+        在并行更新前一次性把近期停牌名单加载到内存，消除多线程首次访问时的
+        锁竞争与重复网络调用（SuspendProvider 内部有内存缓存，命中后 O(1)）。
+        """
+        if not self._suspend.enabled:
+            return
+        try:
+            from datetime import timedelta
+            end = date.today()
+            start = end - timedelta(days=self._suspend._lookback_days)
+            days = self._calendar.get_trading_days(start, end)
+            for d in days:
+                self._suspend.get_suspended_set(d)
+            logger.debug(f"停牌缓存预热完成（{len(days)} 个交易日）")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"停牌缓存预热失败，不影响主流程: {exc}")
+
+    def _prewarm_gbbq_event_cache(self) -> None:
+        """预热全市场 gbbq 除权除息最近日期字典（一次向量化扫描，update() 入口调用）。"""
+        if not self._gbbq.available:
+            return
+        try:
+            self._gbbq_event_cache = self._gbbq.last_event_dates_all()
+            logger.debug(f"gbbq 事件缓存预热完成（{len(self._gbbq_event_cache)} 只股票）")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"gbbq 事件缓存预热失败，回退逐股查询: {exc}")
+            self._gbbq_event_cache = {}
+
     def _should_skip_factor(self, code: str, gbbq: bool = False) -> bool:
         """增量触发器：本地已有因子表且 gbbq 显示无新除权除息事件 → 因子不会变，跳过刷新。
 
@@ -346,7 +382,11 @@ class DataFetcher:
         if existing is None or existing.empty:
             return False
         try:
-            last_ev = self._gbbq.last_event_date(code)
+            # 优先走预热缓存（O(1)），缓存未建时回退逐股查询
+            if self._gbbq_event_cache:
+                last_ev = self._gbbq_event_cache.get(code)
+            else:
+                last_ev = self._gbbq.last_event_date(code)
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[{code}] gbbq 事件查询失败，不跳过因子刷新: {exc}")
             return False
@@ -831,8 +871,11 @@ class DataFetcher:
                 import akshare as ak  # noqa: WPS433
                 df = _ak_call(ak.stock_info_a_code_name)
                 if df is not None and not df.empty:
-                    for _, row in df.iterrows():
-                        self._STOCK_NAME_CACHE[format_code(str(row["code"]))] = str(row["name"])
+                    # 向量化构建，比 iterrows() 快 10x+
+                    self._STOCK_NAME_CACHE.update({
+                        format_code(str(c)): str(n)
+                        for c, n in zip(df["code"].tolist(), df["name"].tolist())
+                    })
             except ProxyConfigError:
                 raise
             except Exception as exc:  # noqa: BLE001

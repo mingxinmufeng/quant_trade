@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import pandas as pd
 from loguru import logger
@@ -282,3 +282,30 @@ class GbbqStore:
         if ev.empty:
             return None
         return pd.Timestamp(ev["date"].max())
+
+    def last_event_dates_all(self) -> Dict[str, Optional[pd.Timestamp]]:
+        """返回全市场所有股票最近除权除息日字典 {std_code: pd.Timestamp}。
+
+        一次 groupby 向量化扫描，避免逐股调用 last_event_date() 重复全表过滤
+        (5000 只股票 x 全表 boolean filter -> 一次 groupby)。供 DataFetcher
+        在 update() 前预热缓存，使 _should_skip_factor 降至 O(1) 查询。
+        """
+        self._load()
+        if self._df is None or self._df.empty:
+            return {}
+        _suffix_by_market = {v: k for k, v in _MARKET_BY_SUFFIX.items()}
+        exdiv = self._df[self._df["category"] == GBBQ_CATEGORY_EXDIV]
+        if exdiv.empty:
+            return {}
+        grp = (
+            exdiv.groupby(["market", "code"])["date"]
+            .max()
+            .reset_index()
+        )
+        result = {}
+        for row in grp.itertuples(index=False):
+            suffix = _suffix_by_market.get(int(row.market))
+            if suffix:
+                std = "{}.{}".format(str(row.code).zfill(6), suffix)
+                result[std] = pd.Timestamp(row.date)
+        return result
