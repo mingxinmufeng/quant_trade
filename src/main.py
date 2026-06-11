@@ -69,16 +69,14 @@ def _build_fetcher(cfg):
 
 
 def _parse_codes(codes: str | None) -> list[str]:
+    """把 ``--codes`` 字符串切成代码列表，分隔符兼容空格 / 逗号 / 分号。"""
     if not codes:
         return []
+    import re
+
     from .utils.helpers import format_code
 
-    out = []
-    for raw in codes.replace(";", ",").split(","):
-        raw = raw.strip()
-        if raw:
-            out.append(format_code(raw))
-    return out
+    return [format_code(raw) for raw in re.split(r"[\s,;]+", codes.strip()) if raw]
 
 
 def _resolve_codes(cfg, codes: str | None, as_of: date, limit: int) -> list[str]:
@@ -103,10 +101,10 @@ def _resolve_codes(cfg, codes: str | None, as_of: date, limit: int) -> list[str]
 
 @app.command()
 def fetch(
-    codes: str | None = typer.Option(None, "--codes", help="逗号分隔股票代码；缺省=全市场 akshare 清单"),
-    freqs: str = typer.Option("daily,min5,min1", "--freqs", help="逗号分隔周期：daily,min5,min1"),
+    codes: str | None = typer.Option(None, "--codes", help="空格/逗号分隔股票代码（多值含空格时加引号）；缺省=全市场 akshare 清单"),
+    freqs: str = typer.Option("daily,min5,min1", "--freqs", help="空格/逗号分隔周期：daily min5 min1"),
     no_bse: bool = typer.Option(False, "--no-bse", help="全市场清单剔除北交所"),
-    throttle: float = typer.Option(0.0, "--throttle", help="每只股票处理完 sleep 秒数（防网络源风控；pytdx 本地源设 0 即可）"),
+    throttle: float = typer.Option(0.3, "--throttle", help="每只股票处理完 sleep 秒数（防网络源风控；纯 pytdx 本地源可设 0）"),
     config: str | None = typer.Option(None, "--config", help="配置文件路径"),
 ):
     """增量更新本地原始行情 + 刷新复权因子（亦即 README 中的 fetch 命令）。
@@ -114,9 +112,11 @@ def fetch(
     缺省（不传 --codes）= 更新 akshare 当前全市场清单（已退市股不在其中），
     与 ``python -m src.data.fetcher`` 行为一致；显式 --codes 则只更新指定股票。
     """
+    import re
+
     cfg = _load_cfg(config)
     fetcher = _build_fetcher(cfg)
-    freq_list = tuple(f.strip() for f in freqs.split(",") if f.strip())
+    freq_list = tuple(f for f in re.split(r"[\s,;]+", freqs.strip()) if f)
 
     code_list = _parse_codes(codes)
     if not code_list:
@@ -141,7 +141,7 @@ def backtest(
     strategy_path: str | None = typer.Option(None, "--strategy-path", help="私有策略外部目录；缺省用内置示例"),
     start: str = typer.Option(..., "--start", help="开始日期 YYYY-MM-DD"),
     end: str = typer.Option(..., "--end", help="结束日期 YYYY-MM-DD"),
-    codes: str | None = typer.Option(None, "--codes", help="逗号分隔股票代码；缺省用 Universe"),
+    codes: str | None = typer.Option(None, "--codes", help="空格/逗号分隔股票代码；缺省用 Universe"),
     limit: int = typer.Option(50, "--limit", help="缺省 codes 时从 Universe 取的股票数上限"),
     adjust: str = typer.Option("hfq", "--adjust", help="复权方式 none/hfq/qfq（回测建议 hfq）"),
     position_size: float | None = typer.Option(None, "--position-size", help="单票目标权重；缺省取 risk.max_single_position"),
@@ -210,7 +210,7 @@ def optimize(
     strategy_path: str | None = typer.Option(None, "--strategy-path", help="私有策略外部目录"),
     start: str = typer.Option(..., "--start", help="开始日期"),
     end: str = typer.Option(..., "--end", help="结束日期"),
-    codes: str | None = typer.Option(None, "--codes", help="逗号分隔股票代码；缺省用 Universe"),
+    codes: str | None = typer.Option(None, "--codes", help="空格/逗号分隔股票代码；缺省用 Universe"),
     limit: int = typer.Option(50, "--limit", help="缺省 codes 时 Universe 股票数上限"),
     trials: int = typer.Option(30, "--trials", help="Optuna 试验次数"),
     metric: str = typer.Option("sharpe", "--metric", help="优化目标：sharpe/annual/calmar"),
