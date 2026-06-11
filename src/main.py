@@ -4,7 +4,7 @@
 
 把数据层 / 因子层 / 策略层 / 引擎层 / 风控层装配成可一键运行的命令：
 
-    python -m src.main fetch      [--codes ...] [--freqs daily]      # 增量更新本地行情
+    python -m src.main fetch      [--codes ...] [--freqs daily,min5,min1]  # 增量更新全市场行情
     python -m src.main backtest   --strategy ma_rsi --codes 000001.SZ,600519.SH \
                                   --start 2022-01-01 --end 2023-12-31
     python -m src.main optimize   --strategy ma_rsi --codes ... --trials 50   # Optuna 调参
@@ -103,17 +103,30 @@ def _resolve_codes(cfg, codes: str | None, as_of: date, limit: int) -> list[str]
 
 @app.command()
 def fetch(
-    codes: str | None = typer.Option(None, "--codes", help="逗号分隔股票代码；缺省=全市场"),
-    freqs: str = typer.Option("daily", "--freqs", help="逗号分隔周期：daily,min5,min1"),
+    codes: str | None = typer.Option(None, "--codes", help="逗号分隔股票代码；缺省=全市场 akshare 清单"),
+    freqs: str = typer.Option("daily,min5,min1", "--freqs", help="逗号分隔周期：daily,min5,min1"),
+    no_bse: bool = typer.Option(False, "--no-bse", help="全市场清单剔除北交所"),
+    throttle: float = typer.Option(0.0, "--throttle", help="每只股票处理完 sleep 秒数（防网络源风控；pytdx 本地源设 0 即可）"),
     config: str | None = typer.Option(None, "--config", help="配置文件路径"),
 ):
-    """增量更新本地原始行情 + 刷新复权因子（亦即 README 中的 fetch 命令）。"""
+    """增量更新本地原始行情 + 刷新复权因子（亦即 README 中的 fetch 命令）。
+
+    缺省（不传 --codes）= 更新 akshare 当前全市场清单（已退市股不在其中），
+    与 ``python -m src.data.fetcher`` 行为一致；显式 --codes 则只更新指定股票。
+    """
     cfg = _load_cfg(config)
     fetcher = _build_fetcher(cfg)
-    code_list = _parse_codes(codes) or None
     freq_list = tuple(f.strip() for f in freqs.split(",") if f.strip())
-    logger.info(f"开始更新 | 股票={'全市场' if code_list is None else len(code_list)} | 周期={freq_list}")
-    fetcher.update(codes=code_list, freqs=freq_list)
+
+    code_list = _parse_codes(codes)
+    if not code_list:
+        code_list = fetcher.list_market_codes(include_bse=not no_bse)
+        if not code_list:
+            raise typer.BadParameter("未能获取全市场代码清单（网络/接口异常），请检查网络或显式指定 --codes")
+        logger.info(f"全市场代码数: {len(code_list)}（含北交所={not no_bse}）")
+
+    logger.info(f"开始更新 | 股票={len(code_list)} | 周期={freq_list}")
+    fetcher.update(codes=code_list, freqs=freq_list, throttle=throttle)
     logger.info("数据更新完成")
 
 
