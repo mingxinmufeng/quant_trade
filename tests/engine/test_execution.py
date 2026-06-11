@@ -6,8 +6,6 @@ from __future__ import annotations
 
 from datetime import date
 
-import pytest
-
 
 def _bar(**kw):
     base = {"date": date(2024, 1, 3), "open": 10.0, "high": 10.6, "low": 9.8,

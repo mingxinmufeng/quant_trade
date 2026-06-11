@@ -17,9 +17,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
-from typing import Dict, List, Tuple
 
-import numpy as np
 import pandas as pd
 from loguru import logger
 
@@ -72,7 +70,7 @@ def _load_df(path: Path, freq: str) -> pd.DataFrame | None:
     return df
 
 
-def _check_columns(df: pd.DataFrame, expected: Dict[str, str], label: str) -> List[str]:
+def _check_columns(df: pd.DataFrame, expected: dict[str, str], label: str) -> list[str]:
     """检查字段是否齐全、类型是否匹配（允许向下兼容，如 float32 视为 float64）。"""
     errs = []
     missing = [c for c in expected if c not in df.columns]
@@ -84,24 +82,14 @@ def _check_columns(df: pd.DataFrame, expected: Dict[str, str], label: str) -> Li
         actual = str(df[col].dtype)
         # 放宽判断：datetime64[ns, UTC] 也视为 datetime64；float32 视为 float
         ok = False
-        if "datetime64" in exp_dtype and "datetime64" in actual:
-            ok = True
-        elif exp_dtype == "float64" and ("float" in actual or actual == "float32"):
-            ok = True
-        elif exp_dtype == "int64" and ("int" in actual or actual == "int32"):
-            ok = True
-        elif exp_dtype == "bool" and actual == "bool":
-            ok = True
-        elif exp_dtype == "string" and (actual == "string" or actual == "object"):
-            ok = True
-        elif actual == exp_dtype:
+        if ("datetime64" in exp_dtype and "datetime64" in actual) or (exp_dtype == "float64" and ("float" in actual or actual == "float32")) or (exp_dtype == "int64" and ("int" in actual or actual == "int32")) or (exp_dtype == "bool" and actual == "bool") or (exp_dtype == "string" and (actual == "string" or actual == "object")) or actual == exp_dtype:
             ok = True
         if not ok:
             errs.append(f"[{label}|{col}] 类型不符: 期望 {exp_dtype}, 实际 {actual}")
     return errs
 
 
-def _check_nulls(df: pd.DataFrame, freq: str, label: str) -> List[str]:
+def _check_nulls(df: pd.DataFrame, freq: str, label: str) -> list[str]:
     """检查关键字段是否存在空值。"""
     errs = []
     cols = list(df.columns)
@@ -117,7 +105,7 @@ def _check_nulls(df: pd.DataFrame, freq: str, label: str) -> List[str]:
     return errs
 
 
-def _check_price_logic(df: pd.DataFrame, freq: str, label: str) -> List[str]:
+def _check_price_logic(df: pd.DataFrame, freq: str, label: str) -> list[str]:
     """检查价格逻辑：high >= max(open,close,low), low <= min(open,close,high)。"""
     errs = []
     if not all(c in df.columns for c in PRICE_COLS):
@@ -136,17 +124,17 @@ def _check_price_logic(df: pd.DataFrame, freq: str, label: str) -> List[str]:
     return errs
 
 
-_tdays_cache: Dict[Tuple[date, date], List[date]] = {}
+_tdays_cache: dict[tuple[date, date], list[date]] = {}
 
 
-def _get_trading_days_cached(calendar: TradingCalendar, start: date, end: date) -> List[date]:
+def _get_trading_days_cached(calendar: TradingCalendar, start: date, end: date) -> list[date]:
     key = (start, end)
     if key not in _tdays_cache:
         _tdays_cache[key] = calendar.get_trading_days(start, end)
     return _tdays_cache[key]
 
 
-def _check_daily_continuity(df: pd.DataFrame, code: str, calendar: TradingCalendar, label: str) -> List[str]:
+def _check_daily_continuity(df: pd.DataFrame, code: str, calendar: TradingCalendar, label: str) -> list[str]:
     """日线：检查日期是否为交易日，且是否连续（允许停牌导致的缺失）。"""
     errs = []
     if df.empty:
@@ -191,7 +179,7 @@ def _parse_minute_period(freq: str) -> int:
     return 0
 
 
-def _check_minute_time(df: pd.DataFrame, freq: str, label: str) -> List[str]:
+def _check_minute_time(df: pd.DataFrame, freq: str, label: str) -> list[str]:
     """分钟线：检查时间是否落在合法交易时段，且严格递增。"""
     errs = []
     if df.empty or "datetime" not in df.columns:
@@ -217,7 +205,7 @@ def _check_minute_time(df: pd.DataFrame, freq: str, label: str) -> List[str]:
 
 def _check_minute_bar_count(
     df: pd.DataFrame, freq: str, label: str, min_bar_ratio: float = 0.8
-) -> List[str]:
+) -> list[str]:
     """分钟线：通用化单日 bar 数检查，并对少于 240 根的情况做合理性判断。
 
     判断逻辑：
@@ -320,7 +308,7 @@ def _check_minute_bar_count(
     return errs
 
 
-def _check_code_consistency(df: pd.DataFrame, code: str, label: str) -> List[str]:
+def _check_code_consistency(df: pd.DataFrame, code: str, label: str) -> list[str]:
     """检查 code 列是否全部一致。"""
     errs = []
     if "code" not in df.columns:
@@ -340,8 +328,8 @@ def _check_code_consistency(df: pd.DataFrame, code: str, label: str) -> List[str
 # ============================================================
 
 def _check_one_file(
-    args: Tuple[Path, str, Dict[str, str], TradingCalendar]
-) -> Tuple[str, List[str]]:
+    args: tuple[Path, str, dict[str, str], TradingCalendar]
+) -> tuple[str, list[str]]:
     """单个文件检查（供线程池调用）。"""
     path, freq, expected_cols, calendar = args
     code = path.stem
@@ -367,7 +355,7 @@ def _check_one_file(
 
 def scan_freq(
     freq: str, calendar: TradingCalendar, workers: int = 8
-) -> Tuple[int, int, List[str]]:
+) -> tuple[int, int, list[str]]:
     """扫描单个周期目录，使用线程池并行检查，返回 (文件数, 通过数, 错误列表)。"""
     d = STORE_PATH / FREQ_DIRS[freq]
     if not d.exists():
@@ -381,7 +369,7 @@ def scan_freq(
 
     expected_cols = DAILY_COLUMNS if freq == "daily" else MINUTE_COLUMNS
     passed = 0
-    all_errs: List[str] = []
+    all_errs: list[str] = []
     args = [(p, freq, expected_cols, calendar) for p in files]
 
     # IO 密集型任务，用线程池加速；默认 workers 取 CPU 核心数或 8
@@ -389,7 +377,7 @@ def scan_freq(
     with ThreadPoolExecutor(max_workers=w) as ex:
         futures = {ex.submit(_check_one_file, a): a for a in args}
         for fut in as_completed(futures):
-            label, errs = fut.result()
+            _label, errs = fut.result()
             if errs:
                 all_errs.extend(errs)
             else:
@@ -410,7 +398,7 @@ def main(workers: int = 0) -> int:
     calendar = TradingCalendar(store_path=STORE_PATH)
     grand_total = 0
     grand_passed = 0
-    grand_errs: List[str] = []
+    grand_errs: list[str] = []
 
     for freq in FREQS:
         total, passed, errs = scan_freq(freq, calendar, workers=workers)

@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Dict, Optional
 
 import pandas as pd
 from loguru import logger
@@ -66,12 +65,12 @@ class GbbqStore:
 
     def __init__(
         self,
-        tdx_path: Optional[str] = None,
-        snapshot_path: Optional["str | Path"] = None,
+        tdx_path: str | None = None,
+        snapshot_path: str | Path | None = None,
     ) -> None:
         self._tdx_path = (tdx_path or "").strip() or _auto_discover_tdx_path()
         self._snapshot_path = Path(snapshot_path) if snapshot_path else None
-        self._df: Optional[pd.DataFrame] = None
+        self._df: pd.DataFrame | None = None
         self._loaded = False
         self._loaded_from_snapshot = False
         self._lock = threading.Lock()
@@ -80,7 +79,7 @@ class GbbqStore:
     # 路径 / 可用性
     # ------------------------------------------------------------
 
-    def gbbq_file(self) -> Optional[Path]:
+    def gbbq_file(self) -> Path | None:
         if not self._tdx_path:
             return None
         return Path(self._tdx_path) / "T0002" / "hq_cache" / "gbbq"
@@ -129,18 +128,18 @@ class GbbqStore:
             return False
         return self._snapshot_path.stat().st_mtime >= src.stat().st_mtime
 
-    def _read_snapshot(self) -> Optional[pd.DataFrame]:
+    def _read_snapshot(self) -> pd.DataFrame | None:
         try:
             df = pd.read_parquet(self._snapshot_path)
             df["date"] = pd.to_datetime(df["date"])
             df["market"] = pd.to_numeric(df["market"], errors="coerce")
             df["category"] = pd.to_numeric(df["category"], errors="coerce")
             return df
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"读取 gbbq 事件快照失败（将回退解析源文件）: {exc}")
             return None
 
-    def save_snapshot(self, force: bool = False) -> Optional[Path]:
+    def save_snapshot(self, force: bool = False) -> Path | None:
         """把解析后的事件落盘为快照；已最新则跳过。返回快照路径或 None。
 
         典型在 ``update`` 流程中调用一次。``force=True`` 强制重写。
@@ -182,6 +181,7 @@ class GbbqStore:
                 df["code"].astype(str),
                 d,
                 pd.to_numeric(df["category"], errors="coerce"),
+                strict=True,
             )
         )
 
@@ -199,13 +199,13 @@ class GbbqStore:
             logger.debug(f"gbbq 文件不存在（tdx_path={self._tdx_path}）")
             return pd.DataFrame()
         try:
-            from pytdx.reader import GbbqReader  # noqa: WPS433
+            from pytdx.reader import GbbqReader
         except ImportError:
             logger.warning("未安装 pytdx，无法读取 gbbq（gbbq 因子源/触发器不可用）")
             return pd.DataFrame()
         try:
             df = GbbqReader().get_df(str(f))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"读取 gbbq 失败: {exc}")
             return pd.DataFrame()
         return self._normalize(df)
@@ -276,14 +276,14 @@ class GbbqStore:
             .reset_index(drop=True)
         )
 
-    def last_event_date(self, code: str) -> Optional[pd.Timestamp]:
+    def last_event_date(self, code: str) -> pd.Timestamp | None:
         """某股最近一次除权除息日；无事件返回 None。"""
         ev = self.events(code)
         if ev.empty:
             return None
         return pd.Timestamp(ev["date"].max())
 
-    def last_event_dates_all(self) -> Dict[str, Optional[pd.Timestamp]]:
+    def last_event_dates_all(self) -> dict[str, pd.Timestamp | None]:
         """返回全市场所有股票最近除权除息日字典 {std_code: pd.Timestamp}。
 
         一次 groupby 向量化扫描，避免逐股调用 last_event_date() 重复全表过滤
@@ -306,6 +306,6 @@ class GbbqStore:
         for row in grp.itertuples(index=False):
             suffix = _suffix_by_market.get(int(row.market))
             if suffix:
-                std = "{}.{}".format(str(row.code).zfill(6), suffix)
+                std = f"{str(row.code).zfill(6)}.{suffix}"
                 result[std] = pd.Timestamp(row.date)
         return result

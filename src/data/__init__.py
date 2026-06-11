@@ -15,9 +15,6 @@
 
 from .adjust import apply_adjust, cum_factor_at
 from .factors import FactorCalculator, FactorProvider
-from .gbbq import GbbqStore
-from .processor import DataProcessor
-from .universe import Universe
 from .fetcher import (
     DataFetcher,
     DataFetchError,
@@ -25,8 +22,11 @@ from .fetcher import (
     resample_daily,
     resample_minute,
 )
+from .gbbq import GbbqStore
+from .processor import DataProcessor
 from .storage import DAILY_COLUMNS, FREQ_DIRS, MINUTE_COLUMNS, DataStore
 from .trading_calendar import TradingCalendar
+from .universe import Universe
 
 __all__ = [
     "DAILY_COLUMNS",

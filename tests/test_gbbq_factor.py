@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import pandas as pd
-import pytest
-
 from pathlib import Path
 
+import pandas as pd
+import pytest
 from src.data.adjust import apply_adjust
 from src.data.factors import FactorCalculator
 from src.data.gbbq import GbbqStore
@@ -183,7 +182,8 @@ def test_snapshot_save_and_roundtrip(tmp_path):
     ])
     snap = tmp_path / "gbbq_events.parquet"
     gs = GbbqStore(tdx_path="__nonexistent__", snapshot_path=snap)
-    gs._loaded = True; gs._df = df
+    gs._loaded = True
+    gs._df = df
 
     p = gs.save_snapshot(force=True)
     assert p == snap and snap.exists()
@@ -193,7 +193,8 @@ def test_snapshot_save_and_roundtrip(tmp_path):
 
     # 从快照重建一个 store，events() 应等价
     gs2 = GbbqStore(tdx_path="__nonexistent__", snapshot_path=snap)
-    gs2._loaded = True; gs2._df = back
+    gs2._loaded = True
+    gs2._df = back
     ev = gs2.events("000001.SZ")
     assert len(ev) == 1
     assert ev["fenhong"].iloc[0] == pytest.approx(10.0)
@@ -201,7 +202,8 @@ def test_snapshot_save_and_roundtrip(tmp_path):
 
 def test_snapshot_noop_without_path():
     gs = GbbqStore(tdx_path="__nonexistent__", snapshot_path=None)
-    gs._loaded = True; gs._df = pd.DataFrame()
+    gs._loaded = True
+    gs._df = pd.DataFrame()
     assert gs.save_snapshot() is None
 
 

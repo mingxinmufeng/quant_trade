@@ -23,7 +23,6 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Optional, Union
 
 import pandas as pd
 
@@ -62,7 +61,7 @@ def align_cum_factor(time_series: pd.Series, factor: pd.DataFrame) -> pd.Series:
     return out.fillna(earliest).astype("float64")
 
 
-def cum_factor_at(factor: pd.DataFrame, anchor_date: Optional[Union[str, date, datetime]]) -> float:
+def cum_factor_at(factor: pd.DataFrame, anchor_date: str | date | datetime | None) -> float:
     """取锚点日（含之前最近一个因子日）的累计因子；anchor=None 取最后一日。空表返回 1.0。"""
     if factor is None or factor.empty:
         return 1.0
@@ -86,8 +85,8 @@ def apply_adjust(
     factor: pd.DataFrame,
     mode: str = "hfq",
     *,
-    time_col: Optional[str] = None,
-    anchor_date: Optional[Union[str, date, datetime]] = None,
+    time_col: str | None = None,
+    anchor_date: str | date | datetime | None = None,
 ) -> pd.DataFrame:
     """把不复权 ``df`` 按 ``factor`` 复权，返回新 df（含 ``adj_factor`` 列）。
 

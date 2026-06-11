@@ -2,9 +2,7 @@
 # CI —— A股量化交易系统
 # ============================================================
 # 触发：push 到主分支 / 针对主分支的 PR / 手动
-# 门禁：pytest 必须通过（阻断合并）
-# 信息：ruff lint 当前为非阻断（codebase 尚在收敛中），
-#       待存量 lint 清理完成后，移除 continue-on-error 即转为强门禁。
+# 门禁：ruff lint + pytest 均必须通过（阻断合并）
 # ============================================================
 name: CI
 
@@ -48,8 +46,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Lint (ruff) — 非阻断
-        continue-on-error: true
+      - name: Lint (ruff)
         run: ruff check src tests --output-format=github
 
       - name: Run tests (pytest)

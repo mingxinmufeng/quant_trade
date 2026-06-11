@@ -34,12 +34,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from enum import IntEnum
-from typing import Any, Dict, Optional
+from typing import Any, ClassVar
 
 import pandas as pd
 from loguru import logger
 
-__all__ = ["Signal", "BaseStrategy"]
+__all__ = ["BaseStrategy", "Signal"]
 
 
 class Signal(IntEnum):
@@ -73,11 +73,11 @@ class BaseStrategy(ABC):
     strategy_name: str = "base"
 
     #: 默认参数（子类覆盖；实例化时与传入 params 合并）
-    default_params: Dict[str, Any] = {}
+    default_params: ClassVar[dict[str, Any]] = {}
 
     def __init__(self, **params: Any) -> None:
-        merged: Dict[str, Any] = {**type(self).default_params, **params}
-        self.params: Dict[str, Any] = merged
+        merged: dict[str, Any] = {**type(self).default_params, **params}
+        self.params: dict[str, Any] = merged
         # 参数同时暴露为属性，便于子类内 self.fast_period 直接取用
         for key, value in merged.items():
             setattr(self, key, value)
@@ -90,7 +90,7 @@ class BaseStrategy(ABC):
     # ------------------------------------------------------------
 
     @abstractmethod
-    def generate_signals(self, data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    def generate_signals(self, data: dict[str, pd.DataFrame]) -> pd.DataFrame:
         """生成信号矩阵。
 
         Args:
@@ -107,7 +107,7 @@ class BaseStrategy(ABC):
     # 超参优化（Optuna）
     # ------------------------------------------------------------
 
-    def get_param_space(self, trial: Any) -> Dict[str, Any]:
+    def get_param_space(self, trial: Any) -> dict[str, Any]:
         """返回 Optuna 参数搜索空间（参数名 → 采样值）。默认空（不调参）。
 
         Args:
@@ -119,14 +119,14 @@ class BaseStrategy(ABC):
     # 参数管理
     # ------------------------------------------------------------
 
-    def set_params(self, **params: Any) -> "BaseStrategy":
+    def set_params(self, **params: Any) -> BaseStrategy:
         """更新参数（同步刷新属性），返回自身以支持链式调用。"""
         self.params.update(params)
         for key, value in params.items():
             setattr(self, key, value)
         return self
 
-    def get_params(self) -> Dict[str, Any]:
+    def get_params(self) -> dict[str, Any]:
         """返回当前参数的浅拷贝。"""
         return dict(self.params)
 
@@ -194,9 +194,9 @@ if __name__ == "__main__":
         """示例：首日全买入并持有。"""
 
         strategy_name = "buy_and_hold"
-        default_params = {"warmup": 0}
+        default_params: ClassVar[dict[str, Any]] = {"warmup": 0}
 
-        def generate_signals(self, data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+        def generate_signals(self, data: dict[str, pd.DataFrame]) -> pd.DataFrame:
             codes = list(data.keys())
             dates = pd.to_datetime(next(iter(data.values()))["date"])
             sig = self.empty_signals(dates, codes)

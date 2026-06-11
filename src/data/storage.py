@@ -27,7 +27,6 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, Optional, Union
 
 import pandas as pd
 from loguru import logger
@@ -41,7 +40,7 @@ from .factors import FACTOR_COLUMNS
 # ============================================================
 
 #: 日线落盘字段（不复权 OHLCV + 元数据）
-DAILY_COLUMNS: Dict[str, str] = {
+DAILY_COLUMNS: dict[str, str] = {
     "date": "datetime64[ns]",
     "code": "string",
     "open": "float64",
@@ -58,7 +57,7 @@ DAILY_COLUMNS: Dict[str, str] = {
 }
 
 #: 分钟线落盘字段（不复权 OHLCV；仅 min1 / min5 落盘）
-MINUTE_COLUMNS: Dict[str, str] = {
+MINUTE_COLUMNS: dict[str, str] = {
     "datetime": "datetime64[ns]",
     "code": "string",
     "open": "float64",
@@ -81,7 +80,7 @@ def _time_col(freq: str) -> str:
 class DataStore:
     """parquet 读写 + 复权缓存的本地仓库。"""
 
-    def __init__(self, store_path: Union[str, Path] = "data_store") -> None:
+    def __init__(self, store_path: str | Path = "data_store") -> None:
         self._store_path = Path(store_path)
         self._dirs = {f: self._store_path / d for f, d in FREQ_DIRS.items()}
         for d in self._dirs.values():
@@ -132,7 +131,7 @@ class DataStore:
     # 原始数据读写
     # ------------------------------------------------------------
 
-    def read_raw(self, code: str, freq: str) -> Optional[pd.DataFrame]:
+    def read_raw(self, code: str, freq: str) -> pd.DataFrame | None:
         path = self.freq_path(code, freq)
         if not path.exists():
             return None
@@ -144,7 +143,7 @@ class DataStore:
                 df["source"] = "legacy"
             df["source"] = df["source"].fillna("legacy").astype("string")
             return df.sort_values(tc).reset_index(drop=True)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"读取本地缓存 {path} 失败: {exc}（视为不存在重拉）")
             return None
 
@@ -166,7 +165,7 @@ class DataStore:
             df["date"] = pd.to_datetime(df["date"])
             df["cum_factor"] = pd.to_numeric(df["cum_factor"], errors="coerce")
             return df.dropna(subset=["date", "cum_factor"]).sort_values("date").reset_index(drop=True)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"读取因子文件 {path} 失败: {exc}")
             return pd.DataFrame(columns=list(FACTOR_COLUMNS.keys()))
 
@@ -199,11 +198,9 @@ class DataStore:
         if raw.exists() and raw.stat().st_mtime > cache_mt:
             return False
         factor = self._effective_factor_path(code, use_gbbq)
-        if factor.exists() and factor.stat().st_mtime > cache_mt:
-            return False
-        return True
+        return not (factor.exists() and factor.stat().st_mtime > cache_mt)
 
-    def _build_hfq_cache(self, code: str, freq: str, use_gbbq: bool = False) -> Optional[pd.DataFrame]:
+    def _build_hfq_cache(self, code: str, freq: str, use_gbbq: bool = False) -> pd.DataFrame | None:
         """重算并落盘 hfq 缓存；原始缺失返回 None。"""
         raw = self.read_raw(code, freq)
         if raw is None or raw.empty:
@@ -219,7 +216,7 @@ class DataStore:
         )
         return hfq
 
-    def get_hfq(self, code: str, freq: str, use_gbbq: bool = False) -> Optional[pd.DataFrame]:
+    def get_hfq(self, code: str, freq: str, use_gbbq: bool = False) -> pd.DataFrame | None:
         """取后复权数据（命中有效缓存直接读，否则重算覆盖）。"""
         if self._hfq_cache_valid(code, freq, use_gbbq):
             try:
@@ -227,7 +224,7 @@ class DataStore:
                 tc = _time_col(freq)
                 df[tc] = pd.to_datetime(df[tc])
                 return df.sort_values(tc).reset_index(drop=True)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning(f"[{code}|{freq}] 读 hfq 缓存失败，重算: {exc}")
         return self._build_hfq_cache(code, freq, use_gbbq)
 
@@ -237,9 +234,9 @@ class DataStore:
         freq: str,
         adjust: str = "hfq",
         *,
-        anchor_date: Optional[Union[str, date, datetime]] = None,
+        anchor_date: str | date | datetime | None = None,
         use_gbbq: bool = False,
-    ) -> Optional[pd.DataFrame]:
+    ) -> pd.DataFrame | None:
         """加载某周期数据并按 ``adjust`` 复权。
 
         - ``none``：原始不复权。

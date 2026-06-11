@@ -28,7 +28,7 @@ import os
 import random
 import threading
 import time
-from typing import Callable, Dict, Optional
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
@@ -48,13 +48,13 @@ class FactorProvider:
     """统一拉取「日期 → 累计后复权因子」表，按股票缓存，单源锁定不 fallback。"""
 
     def __init__(self, source: str = "sina", jitter: float = 0.0) -> None:
-        self._cache: Dict[str, pd.DataFrame] = {}
+        self._cache: dict[str, pd.DataFrame] = {}
         self._jitter = max(0.0, float(jitter))
         self._pro = None  # tushare lazy
         self._source = (source or "sina").strip().lower()
         # 多线程：每只股票一把锁，保证同一代码只拉取一次因子（避免并发重复请求）
         self._lock = threading.Lock()
-        self._code_locks: Dict[str, threading.Lock] = {}
+        self._code_locks: dict[str, threading.Lock] = {}
 
     def _code_lock(self, code: str) -> threading.Lock:
         with self._lock:
@@ -93,7 +93,7 @@ class FactorProvider:
                 df = fn(std)
             except ProxyConfigError:
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.debug(f"[{std}] 复权因子源 {self._source} 失败: {exc}")
                 df = None
             if df is not None and not df.empty:
@@ -111,7 +111,7 @@ class FactorProvider:
         time.sleep(base + (random.uniform(0, self._jitter) if self._jitter else 0.0))
 
     def _from_sina(self, code: str) -> pd.DataFrame:
-        import akshare as ak  # noqa: WPS433
+        import akshare as ak
         self._sleep()  # 新浪源防风控：请求前节流
         num, mkt = code.split(".")
         df = _ak_call(
@@ -131,7 +131,7 @@ class FactorProvider:
                     token = os.environ.get("TUSHARE_TOKEN", "").strip()
                     if not token:
                         return pd.DataFrame()
-                    import tushare as ts  # noqa: WPS433
+                    import tushare as ts
                     ts.set_token(token)
                     self._pro = ts.pro_api()
         df = self._pro.adj_factor(ts_code=code)
@@ -142,7 +142,7 @@ class FactorProvider:
         return df[["date", "cum_factor"]].dropna()
 
     def _from_em(self, code: str) -> pd.DataFrame:
-        import akshare as ak  # noqa: WPS433
+        import akshare as ak
         symbol = code.split(".")[0]
         hfq = _ak_call(
             ak.stock_zh_a_hist, code=code,
@@ -192,7 +192,7 @@ class FactorCalculator:
     def __init__(
         self,
         gbbq_store,
-        raw_close_loader: Callable[[str], Optional[pd.DataFrame]],
+        raw_close_loader: Callable[[str], pd.DataFrame | None],
     ) -> None:
         """
         Args:
@@ -201,9 +201,9 @@ class FactorCalculator:
         """
         self._gbbq = gbbq_store
         self._load_raw = raw_close_loader
-        self._cache: Dict[str, pd.DataFrame] = {}
+        self._cache: dict[str, pd.DataFrame] = {}
         self._lock = threading.Lock()
-        self._code_locks: Dict[str, threading.Lock] = {}
+        self._code_locks: dict[str, threading.Lock] = {}
 
     def _code_lock(self, code: str) -> threading.Lock:
         with self._lock:
@@ -229,7 +229,7 @@ class FactorCalculator:
             return df
 
     @staticmethod
-    def _compute(raw: Optional[pd.DataFrame], events: pd.DataFrame) -> pd.DataFrame:
+    def _compute(raw: pd.DataFrame | None, events: pd.DataFrame) -> pd.DataFrame:
         empty = pd.DataFrame(columns=list(FACTOR_COLUMNS.keys()))
         if raw is None or raw.empty or "close" not in raw.columns or "date" not in raw.columns:
             return empty

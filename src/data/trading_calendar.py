@@ -29,16 +29,13 @@ A 股交易日历
 from __future__ import annotations
 
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
-from typing import List, Optional, Union
 
-import numpy as np
 import pandas as pd
 from loguru import logger
 
 from ..utils.helpers import ensure_dir, parse_date, retry
-
 
 # ============================================================
 # 常量
@@ -77,7 +74,7 @@ class TradingCalendar:
 
     def __init__(
         self,
-        store_path: Union[str, Path] = "data_store",
+        store_path: str | Path = "data_store",
         refresh_days: int = 7,
         auto_load: bool = True,
     ) -> None:
@@ -176,7 +173,7 @@ class TradingCalendar:
             列名为 ``trade_date``，类型为 datetime.date。
         """
         # 延迟 import，避免未联网环境下纯本地缓存测试也强制依赖 akshare
-        import akshare as ak  # noqa: WPS433
+        import akshare as ak
 
         df = ak.tool_trade_date_hist_sina()
         if df is None or df.empty:
@@ -210,7 +207,7 @@ class TradingCalendar:
     # 公开查询接口
     # ------------------------------------------------------------
 
-    def is_trading_day(self, d: Union[str, date, datetime]) -> bool:
+    def is_trading_day(self, d: str | date | datetime) -> bool:
         """
         判断指定日期是否为交易日。
 
@@ -227,7 +224,7 @@ class TradingCalendar:
         return bool(pos < len(self._trading_days) and self._trading_days[pos] == ts)
 
     def next_trading_day(
-        self, d: Union[str, date, datetime], n: int = 1
+        self, d: str | date | datetime, n: int = 1
     ) -> date:
         """
         返回距 d 之后的第 n 个交易日。
@@ -258,7 +255,7 @@ class TradingCalendar:
         return self._trading_days[target].date()
 
     def previous_trading_day(
-        self, d: Union[str, date, datetime], n: int = 1
+        self, d: str | date | datetime, n: int = 1
     ) -> date:
         """
         返回距 d 之前的第 n 个交易日。
@@ -290,9 +287,9 @@ class TradingCalendar:
 
     def get_trading_days(
         self,
-        start: Union[str, date, datetime],
-        end: Union[str, date, datetime],
-    ) -> List[date]:
+        start: str | date | datetime,
+        end: str | date | datetime,
+    ) -> list[date]:
         """
         返回闭区间 ``[start, end]`` 内的全部交易日列表。
 

@@ -28,7 +28,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, ClassVar
 
 import pandas as pd
 from loguru import logger
@@ -44,7 +44,7 @@ class MaRsiStrategy(BaseStrategy):
 
     strategy_name = "ma_rsi"
 
-    default_params: Dict[str, Any] = {
+    default_params: ClassVar[dict[str, Any]] = {
         "fast_period": 10,
         "slow_period": 30,
         "rsi_period": 14,
@@ -56,7 +56,7 @@ class MaRsiStrategy(BaseStrategy):
     # 信号生成
     # ------------------------------------------------------------
 
-    def generate_signals(self, data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    def generate_signals(self, data: dict[str, pd.DataFrame]) -> pd.DataFrame:
         if not data:
             return self.validate_signals(pd.DataFrame())
 
@@ -66,7 +66,7 @@ class MaRsiStrategy(BaseStrategy):
                 f"slow_period({self.slow_period})，双均线退化，请检查参数"
             )
 
-        per_stock: Dict[str, pd.Series] = {}
+        per_stock: dict[str, pd.Series] = {}
         for code, df in data.items():
             if df is None or df.empty or "close" not in df.columns:
                 continue
@@ -102,7 +102,7 @@ class MaRsiStrategy(BaseStrategy):
     # Optuna 搜索空间
     # ------------------------------------------------------------
 
-    def get_param_space(self, trial: Any) -> Dict[str, Any]:
+    def get_param_space(self, trial: Any) -> dict[str, Any]:
         fast = trial.suggest_int("fast_period", 3, 20)
         slow = trial.suggest_int("slow_period", fast + 5, 120)
         return {

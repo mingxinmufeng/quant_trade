@@ -20,7 +20,6 @@ from datetime import date
 
 import pandas as pd
 
-
 # ============================================================
 # 异常
 # ============================================================
@@ -61,7 +60,7 @@ def _ak_call(func, *args, code: str = "", **kwargs):
         return func(*args, **kwargs)
     except ProxyConfigError:
         raise
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         _raise_if_proxy_error(exc, code)
         raise
 

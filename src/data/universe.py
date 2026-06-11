@@ -46,9 +46,9 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -66,7 +66,7 @@ BASIC_INFO_FILE = "stock_basic.parquet"
 INDEX_WEIGHTS_DIR = "index_weights"
 
 #: 基础信息表字段 schema
-BASIC_COLUMNS: Dict[str, str] = {
+BASIC_COLUMNS: dict[str, str] = {
     "code": "string",
     "name": "string",
     "list_date": "datetime64[ns]",
@@ -89,7 +89,7 @@ _RETRY_DELAYS = [1, 2, 4]
 # ============================================================
 
 
-def _pick_col(df: pd.DataFrame, *keyword_groups: Sequence[str]) -> Optional[str]:
+def _pick_col(df: pd.DataFrame, *keyword_groups: Sequence[str]) -> str | None:
     """按关键字组在 df 列名中模糊匹配第一个命中的列名（兼容 akshare 多版本列名）。
 
     每个 ``keyword_groups`` 是一组"且"关系关键字：列名需**同时包含**该组全部关键字。
@@ -115,7 +115,7 @@ def _classify_market(code: str) -> str:
     return "主板"
 
 
-def is_st_name(name: Optional[str]) -> bool:
+def is_st_name(name: str | None) -> bool:
     """证券简称是否含 ST / *ST / 退（当前名近似判定）。"""
     if not name:
         return False
@@ -143,7 +143,7 @@ class Universe:
 
     def __init__(
         self,
-        store_path: Union[str, Path] = "data_store",
+        store_path: str | Path = "data_store",
         min_list_days: int = 60,
         exclude_st: bool = True,
         exclude_new_ipo: bool = True,
@@ -166,7 +166,7 @@ class Universe:
     # ------------------------------------------------------------
 
     @classmethod
-    def from_config(cls, config, auto_load: bool = True) -> "Universe":
+    def from_config(cls, config, auto_load: bool = True) -> Universe:
         """从 ``load_config()`` 的结果构造（读取 ``data.store_path`` 与 ``universe.*``）。"""
         data_cfg = config.get("data", {}) if hasattr(config, "get") else {}
         uni_cfg = config.get("universe", {}) if hasattr(config, "get") else {}
@@ -217,7 +217,7 @@ class Universe:
                 f"股票基础信息已刷新 | 总数 {len(df)} | "
                 f"在市 {int(df['delist_date'].isna().sum())} | 缓存 {self._cache_file}"
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if cache_exists:
                 logger.warning(
                     f"远程基础信息拉取失败（{type(exc).__name__}: {exc}），沿用本地缓存 {self._cache_file}"
@@ -266,23 +266,23 @@ class Universe:
 
     def _fetch_basic_info_remote(self) -> pd.DataFrame:
         """拉取并合并在市 + 退市股票基础信息。"""
-        frames: List[pd.DataFrame] = []
+        frames: list[pd.DataFrame] = []
         # 在市
         for fetch in (self._fetch_listed_sh, self._fetch_listed_sz, self._fetch_listed_bj):
             try:
                 part = fetch()
                 if part is not None and not part.empty:
                     frames.append(part)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning(f"在市清单 {fetch.__name__} 拉取失败: {type(exc).__name__}: {exc}")
         # 退市（delist_date 非空）
-        delist_frames: List[pd.DataFrame] = []
+        delist_frames: list[pd.DataFrame] = []
         for fetch in (self._fetch_delist_sh, self._fetch_delist_sz):
             try:
                 part = fetch()
                 if part is not None and not part.empty:
                     delist_frames.append(part)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning(f"退市清单 {fetch.__name__} 拉取失败: {type(exc).__name__}: {exc}")
 
         if not frames and not delist_frames:
@@ -298,21 +298,21 @@ class Universe:
 
     @retry(max_attempts=_RETRY_TIMES, delays=_RETRY_DELAYS)
     def _fetch_listed_sh(self) -> pd.DataFrame:
-        import akshare as ak  # noqa: WPS433
+        import akshare as ak
 
         df = _ak_call(ak.stock_info_sh_name_code)
         return self._norm_listed(df, default_suffix="SH")
 
     @retry(max_attempts=_RETRY_TIMES, delays=_RETRY_DELAYS)
     def _fetch_listed_sz(self) -> pd.DataFrame:
-        import akshare as ak  # noqa: WPS433
+        import akshare as ak
 
         df = _ak_call(ak.stock_info_sz_name_code)
         return self._norm_listed(df, default_suffix="SZ")
 
     @retry(max_attempts=_RETRY_TIMES, delays=_RETRY_DELAYS)
     def _fetch_listed_bj(self) -> pd.DataFrame:
-        import akshare as ak  # noqa: WPS433
+        import akshare as ak
 
         df = _ak_call(ak.stock_info_bj_name_code)
         return self._norm_listed(df, default_suffix="BJ")
@@ -342,14 +342,14 @@ class Universe:
 
     @retry(max_attempts=_RETRY_TIMES, delays=_RETRY_DELAYS)
     def _fetch_delist_sh(self) -> pd.DataFrame:
-        import akshare as ak  # noqa: WPS433
+        import akshare as ak
 
         df = _ak_call(ak.stock_info_sh_delist)
         return self._norm_delist(df, default_suffix="SH")
 
     @retry(max_attempts=_RETRY_TIMES, delays=_RETRY_DELAYS)
     def _fetch_delist_sz(self) -> pd.DataFrame:
-        import akshare as ak  # noqa: WPS433
+        import akshare as ak
 
         # 深市退市接口需指定终止上市公司
         try:
@@ -382,7 +382,7 @@ class Universe:
         return out
 
     @staticmethod
-    def _safe_format_code(raw: str, default_suffix: str) -> Optional[str]:
+    def _safe_format_code(raw: str, default_suffix: str) -> str | None:
         """把交易所原始代码归一为标准格式；纯 6 位无后缀时按交易所补后缀。"""
         s = str(raw).strip()
         if not s or s.lower() in ("nan", "none"):
@@ -395,7 +395,7 @@ class Universe:
             return None
         try:
             std = format_code(digits)
-        except Exception:  # noqa: BLE001
+        except Exception:
             return None
         # format_code 对北交所/科创板等已能判定；若仍异常按 default_suffix 兜底
         if not (std.endswith(".SH") or std.endswith(".SZ") or std.endswith(".BJ")):
@@ -406,7 +406,7 @@ class Universe:
     # 公开接口 1：可交易股票池
     # ------------------------------------------------------------
 
-    def get_tradable_stocks(self, as_of_date: Union[str, date, datetime]) -> List[str]:
+    def get_tradable_stocks(self, as_of_date: str | date | datetime) -> list[str]:
         """返回 ``as_of_date`` 时点真实可交易的股票代码列表（严防幸存者偏差）。
 
         过滤顺序：
@@ -450,8 +450,8 @@ class Universe:
     # ------------------------------------------------------------
 
     def get_index_components(
-        self, index_code: str, as_of_date: Union[str, date, datetime]
-    ) -> List[str]:
+        self, index_code: str, as_of_date: str | date | datetime
+    ) -> list[str]:
         """返回 ``index_code`` 在 ``as_of_date`` 的成分股（取最近且不晚于该日的快照）。
 
         从 ``{store}/index_weights/{index_code}/{YYYYMMDD}.parquet`` 读取调仓日快照。
@@ -484,8 +484,8 @@ class Universe:
         return sorted(set(codes))
 
     def refresh_index_components(
-        self, index_code: str, as_of: Optional[Union[str, date, datetime]] = None
-    ) -> List[str]:
+        self, index_code: str, as_of: str | date | datetime | None = None
+    ) -> list[str]:
         """拉取 ``index_code`` **当前**成分股权重并落盘为一份快照（文件名=快照日）。
 
         csindex 接口只提供当前权重，无法回溯历史；本方法用于**定期**调用以逐步积累
@@ -507,7 +507,7 @@ class Universe:
     @retry(max_attempts=_RETRY_TIMES, delays=_RETRY_DELAYS)
     def _fetch_index_weight_remote(self, std_index: str) -> pd.DataFrame:
         """拉取中证指数当前成分股权重（``ak.index_stock_cons_weight_csindex``）。"""
-        import akshare as ak  # noqa: WPS433
+        import akshare as ak
 
         bare = std_index.split(".")[0]
         df = _ak_call(ak.index_stock_cons_weight_csindex, symbol=bare)
@@ -540,9 +540,9 @@ class Universe:
         return f"{digits}.{suffix}"
 
     @staticmethod
-    def _list_snapshots(snap_dir: Path) -> List[tuple]:
+    def _list_snapshots(snap_dir: Path) -> list[tuple]:
         """返回 ``[(snapshot_date, path), ...]`` 按日期升序（文件名 YYYYMMDD）。"""
-        out: List[tuple] = []
+        out: list[tuple] = []
         for p in snap_dir.glob("*.parquet"):
             try:
                 d = pd.Timestamp(datetime.strptime(p.stem, "%Y%m%d"))
@@ -552,10 +552,10 @@ class Universe:
         return sorted(out, key=lambda t: t[0])
 
     @staticmethod
-    def _read_snapshot_codes(path: Path) -> List[str]:
+    def _read_snapshot_codes(path: Path) -> list[str]:
         try:
             df = pd.read_parquet(path)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"读取指数快照 {path} 失败: {exc}")
             return []
         if "code" not in df.columns:

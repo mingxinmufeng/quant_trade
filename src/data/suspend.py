@@ -29,9 +29,9 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Sequence
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, FrozenSet, Optional, Sequence, Union
 
 import pandas as pd
 from loguru import logger
@@ -46,14 +46,14 @@ DEFAULT_SUSPEND_SOURCES = ("eastmoney", "tushare")
 DEFAULT_SUSPEND_LOOKBACK_DAYS = 30
 
 
-def _to_date(d: Union[str, date, datetime, pd.Timestamp]) -> date:
+def _to_date(d: str | date | datetime | pd.Timestamp) -> date:
     """归一为 ``datetime.date``。"""
     if isinstance(d, date) and not isinstance(d, datetime):
         return d
     return pd.Timestamp(d).date()
 
 
-def _norm_code(raw) -> Optional[str]:
+def _norm_code(raw) -> str | None:
     """东财/ tushare 原始代码 → ``format_code`` 标准格式；无法解析返回 None。"""
     if raw is None:
         return None
@@ -65,7 +65,7 @@ def _norm_code(raw) -> Optional[str]:
         s = s.zfill(6)
     try:
         return format_code(s)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 
@@ -74,7 +74,7 @@ class SuspendProvider:
 
     def __init__(
         self,
-        store_path: Union[str, Path] = "data_store",
+        store_path: str | Path = "data_store",
         sources: Sequence[str] = DEFAULT_SUSPEND_SOURCES,
         lookback_days: int = DEFAULT_SUSPEND_LOOKBACK_DAYS,
         enabled: bool = True,
@@ -83,7 +83,7 @@ class SuspendProvider:
         self._sources = tuple(s.strip().lower() for s in sources if s and s.strip())
         self._lookback_days = max(0, int(lookback_days))
         self._enabled = bool(enabled)
-        self._mem: Dict[str, FrozenSet[str]] = {}
+        self._mem: dict[str, frozenset[str]] = {}
         self._lock = threading.Lock()
         self._tushare_pro = None  # lazy
         self._tushare_failed = False
@@ -92,7 +92,7 @@ class SuspendProvider:
     # 公开接口
     # ------------------------------------------------------------
 
-    def get_suspended_set(self, trade_date: Union[str, date, datetime, pd.Timestamp]) -> FrozenSet[str]:
+    def get_suspended_set(self, trade_date: str | date | datetime | pd.Timestamp) -> frozenset[str]:
         """返回 ``trade_date`` 当日全市场停牌代码集合（标准代码）。
 
         命中内存/磁盘缓存直接返回；超出 lookback 的久远历史返回空集（不联网）。
@@ -141,7 +141,7 @@ class SuspendProvider:
     def _cache_path(self, key: str) -> Path:
         return self._dir / f"{key}.parquet"
 
-    def _load_cache(self, key: str) -> Optional[FrozenSet[str]]:
+    def _load_cache(self, key: str) -> frozenset[str] | None:
         path = self._cache_path(key)
         if not path.exists():
             return None
@@ -150,24 +150,24 @@ class SuspendProvider:
             if "code" not in df.columns:
                 return frozenset()
             return frozenset(str(c) for c in df["code"].dropna().tolist())
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"读取停牌缓存 {path} 失败（视为未缓存）: {exc}")
             return None
 
-    def _write_cache(self, key: str, codes: FrozenSet[str], source: str) -> None:
+    def _write_cache(self, key: str, codes: frozenset[str], source: str) -> None:
         path = self._cache_path(key)
         try:
             df = pd.DataFrame({"code": sorted(codes)})
             df["source"] = source
             df.to_parquet(path, index=False, compression="snappy")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"写停牌缓存 {path} 失败: {exc}")
 
     # ------------------------------------------------------------
     # 取数（按源优先级）
     # ------------------------------------------------------------
 
-    def _fetch(self, d: date, key: str) -> FrozenSet[str]:
+    def _fetch(self, d: date, key: str) -> frozenset[str]:
         for src in self._sources:
             try:
                 if src == "eastmoney":
@@ -177,7 +177,7 @@ class SuspendProvider:
                 else:
                     logger.debug(f"未知停牌源 {src}，跳过")
                     continue
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning(f"停牌源 {src} 拉取 {key} 失败: {type(exc).__name__}: {exc}")
                 continue
             if codes is not None:
@@ -187,9 +187,9 @@ class SuspendProvider:
         logger.warning(f"停牌名单 {key} 所有源均失败/无数据，本次返回空集（不缓存，下次重试）")
         return frozenset()
 
-    def _fetch_eastmoney(self, d: date, key: str) -> Optional[FrozenSet[str]]:
+    def _fetch_eastmoney(self, d: date, key: str) -> frozenset[str] | None:
         """东方财富两市停复牌：``ak.stock_tfp_em(date='YYYYMMDD')``。"""
-        import akshare as ak  # noqa: WPS433
+        import akshare as ak
 
         df = _ak_call(ak.stock_tfp_em, date=key)
         if df is None:
@@ -200,7 +200,7 @@ class SuspendProvider:
         codes = {c for c in (_norm_code(v) for v in df[col].tolist()) if c}
         return frozenset(codes)
 
-    def _fetch_tushare(self, d: date, key: str) -> Optional[FrozenSet[str]]:
+    def _fetch_tushare(self, d: date, key: str) -> frozenset[str] | None:
         """tushare 全日停牌：``pro.suspend_d(suspend_type='S', trade_date='YYYYMMDD')``。"""
         pro = self._get_tushare_pro()
         if pro is None:
@@ -225,10 +225,10 @@ class SuspendProvider:
             self._tushare_failed = True
             return None
         try:
-            import tushare as ts  # noqa: WPS433
+            import tushare as ts
             ts.set_token(token)
             self._tushare_pro = ts.pro_api()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"初始化 tushare 失败，停牌兜底不可用: {exc}")
             self._tushare_failed = True
             return None

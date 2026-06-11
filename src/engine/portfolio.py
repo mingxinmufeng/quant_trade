@@ -30,15 +30,14 @@ A 股资金 / 持仓规则
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Dict, List, Optional, Union
 
 from loguru import logger
 
 from ..utils.helpers import truncate_to_100
 
-__all__ = ["Position", "Portfolio"]
+__all__ = ["Portfolio", "Position"]
 
 #: 浮点比较容差（资金校验用）
 _EPS = 1e-6
@@ -52,7 +51,7 @@ class Position:
     shares: int = 0                 # 总持股
     frozen: int = 0                 # 当日买入冻结（T+1 不可卖）
     avg_cost: float = 0.0           # 含买入手续费的每股成本（成本基）
-    open_date: Optional[date] = None  # 当前持仓的建仓日（清仓后重置）
+    open_date: date | None = None  # 当前持仓的建仓日（清仓后重置）
     last_price: float = 0.0         # 最新市价（mark-to-market）
 
     @property
@@ -89,10 +88,10 @@ class Portfolio:
         self.cash = float(initial_cash)         # 含冻结的总现金
         self.frozen_cash = 0.0                  # 当日卖出冻结资金（T+1）
         self.t1_cash_freeze = bool(t1_cash_freeze)
-        self.positions: Dict[str, Position] = {}
+        self.positions: dict[str, Position] = {}
         self.realized_pnl = 0.0
         #: round-trip 成交记录（dict 字段与 backtester.Trade 对齐）
-        self.realized_trades: List[Dict] = []
+        self.realized_trades: list[dict] = []
 
     # ------------------------------------------------------------
     # 资金 / 估值
@@ -118,10 +117,10 @@ class Portfolio:
         pos = self.positions.get(code)
         return pos is not None and pos.shares > 0
 
-    def get_position(self, code: str) -> Optional[Position]:
+    def get_position(self, code: str) -> Position | None:
         return self.positions.get(code)
 
-    def position_shares(self) -> Dict[str, int]:
+    def position_shares(self) -> dict[str, int]:
         """``{code: shares}``（仅含 shares>0）。"""
         return {c: p.shares for c, p in self.positions.items() if p.shares > 0}
 
@@ -216,7 +215,7 @@ class Portfolio:
     # 估值
     # ------------------------------------------------------------
 
-    def mark_to_market(self, prices: Dict[str, float]) -> None:
+    def mark_to_market(self, prices: dict[str, float]) -> None:
         """用当日价更新持仓市价；缺价/停牌（NaN）的股票保留上一市价。"""
         for code, pos in self.positions.items():
             px = prices.get(code)
@@ -270,7 +269,7 @@ class Portfolio:
     # 快照
     # ------------------------------------------------------------
 
-    def snapshot(self, trade_date) -> Dict:
+    def snapshot(self, trade_date) -> dict:
         """返回当日账户快照（供 backtester 组装净值曲线 / 持仓表）。"""
         return {
             "date": _to_date(trade_date),
@@ -290,7 +289,7 @@ class Portfolio:
         )
 
 
-def _to_date(d: Union[str, date, datetime]) -> date:
+def _to_date(d: str | date | datetime) -> date:
     """归一为 ``datetime.date``。"""
     if isinstance(d, datetime):
         return d.date()

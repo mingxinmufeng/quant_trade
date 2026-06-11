@@ -34,9 +34,10 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Optional, Union
+from typing import Any
 
 import yaml
 from loguru import logger
@@ -63,7 +64,7 @@ DOT_SEP = "."
 
 #: 内置默认配置（最低优先级，保证 config.yaml 缺字段时仍可运行）
 #: 与 config.yaml 公开模板字段一一对应，注释见 config.yaml
-DEFAULT_CONFIG: Dict[str, Any] = {
+DEFAULT_CONFIG: dict[str, Any] = {
     "data": {
         "store_path": "data_store",
         "sources": ["pytdx", "akshare", "baostock", "tushare"],
@@ -150,7 +151,7 @@ class DotDict(dict):
     - 拷贝/序列化时仍是普通 dict（通过 to_dict()）
     """
 
-    def __init__(self, mapping: Optional[Mapping[str, Any]] = None):
+    def __init__(self, mapping: Mapping[str, Any] | None = None):
         super().__init__()
         if mapping:
             for key, value in mapping.items():
@@ -181,9 +182,9 @@ class DotDict(dict):
             raise AttributeError(f"配置中不存在键: {key}") from exc
 
     # ---- 类型转换 ----
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """递归还原为普通 dict（用于序列化、日志打印）"""
-        result: Dict[str, Any] = {}
+        result: dict[str, Any] = {}
         for key, value in self.items():
             if isinstance(value, DotDict):
                 result[key] = value.to_dict()
@@ -201,7 +202,7 @@ class DotDict(dict):
 # ============================================================
 
 
-def _deep_merge(base: Dict[str, Any], override: Mapping[str, Any]) -> Dict[str, Any]:
+def _deep_merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
     """
     深度合并两个字典：override 覆盖 base，嵌套 dict 逐层合并。
 
@@ -222,7 +223,7 @@ def _deep_merge(base: Dict[str, Any], override: Mapping[str, Any]) -> Dict[str, 
     return result
 
 
-def _load_yaml_file(path: Path) -> Dict[str, Any]:
+def _load_yaml_file(path: Path) -> dict[str, Any]:
     """
     安全加载 YAML 文件为 dict。空文件返回 {}，文件不存在抛 FileNotFoundError。
     """
@@ -278,7 +279,7 @@ def _coerce_env_value(raw: str) -> Any:
     return s
 
 
-def _set_nested(target: Dict[str, Any], path_parts: Iterable[str], value: Any) -> None:
+def _set_nested(target: dict[str, Any], path_parts: Iterable[str], value: Any) -> None:
     """
     按路径在嵌套字典中设置值，中间缺失节点自动用 dict 补齐。
 
@@ -298,7 +299,7 @@ def _set_nested(target: Dict[str, Any], path_parts: Iterable[str], value: Any) -
     cursor[parts[-1]] = value
 
 
-def _collect_env_overrides(prefix: str = ENV_PREFIX) -> Dict[str, Any]:
+def _collect_env_overrides(prefix: str = ENV_PREFIX) -> dict[str, Any]:
     """
     扫描 os.environ，收集所有 QUANT_ 前缀变量并按 __ 拆分为嵌套覆盖。
 
@@ -308,7 +309,7 @@ def _collect_env_overrides(prefix: str = ENV_PREFIX) -> Dict[str, Any]:
         →
         {"risk": {"commission_rate": 0.0001}, "data": {"sources": ["akshare"]}}
     """
-    overrides: Dict[str, Any] = {}
+    overrides: dict[str, Any] = {}
     for raw_key, raw_value in os.environ.items():
         if not raw_key.startswith(prefix):
             continue
@@ -323,12 +324,12 @@ def _collect_env_overrides(prefix: str = ENV_PREFIX) -> Dict[str, Any]:
     return overrides
 
 
-def _expand_dot_overrides(overrides: Mapping[str, Any]) -> Dict[str, Any]:
+def _expand_dot_overrides(overrides: Mapping[str, Any]) -> dict[str, Any]:
     """
     把 {"risk.commission_rate": 0.0001} 展开为 {"risk": {"commission_rate": 0.0001}}。
     若键不含点号，则视为顶层键。
     """
-    nested: Dict[str, Any] = {}
+    nested: dict[str, Any] = {}
     for dotted_key, value in overrides.items():
         parts = [p for p in dotted_key.split(DOT_SEP) if p]
         if not parts:
@@ -343,11 +344,11 @@ def _expand_dot_overrides(overrides: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def load_config(
-    config_path: Optional[Union[str, Path]] = None,
-    private_path: Optional[Union[str, Path]] = None,
-    overrides: Optional[Mapping[str, Any]] = None,
+    config_path: str | Path | None = None,
+    private_path: str | Path | None = None,
+    overrides: Mapping[str, Any] | None = None,
     load_env: bool = True,
-    env_file: Optional[Union[str, Path]] = None,
+    env_file: str | Path | None = None,
 ) -> DotDict:
     """
     加载并合并多源配置，返回 DotDict。
@@ -383,7 +384,7 @@ def load_config(
             logger.debug(f".env 已加载: {target_env}")
 
     # 2. 起始配置 = 内置默认
-    merged: Dict[str, Any] = deepcopy(DEFAULT_CONFIG)
+    merged: dict[str, Any] = deepcopy(DEFAULT_CONFIG)
 
     # 3. 合并公开 config.yaml（默认查找项目根；不存在不报错，仅警告）
     yaml_path = Path(config_path) if config_path else project_root / "config.yaml"

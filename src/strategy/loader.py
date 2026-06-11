@@ -40,18 +40,18 @@ A 股私有策略常见"文件名 snake_case、类名 PascalCase"不一致（如
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import importlib.util
 import inspect
 import sys
 from pathlib import Path
-from typing import List, Optional, Type
 
 from loguru import logger
 
 from .base import BaseStrategy
 
-__all__ = ["StrategyLoadError", "load_strategy", "create_strategy", "list_examples"]
+__all__ = ["StrategyLoadError", "create_strategy", "list_examples", "load_strategy"]
 
 
 class StrategyLoadError(Exception):
@@ -63,7 +63,7 @@ class StrategyLoadError(Exception):
 # ============================================================
 
 
-def load_strategy(strategy_name: str, external_path: Optional[str] = None) -> Type[BaseStrategy]:
+def load_strategy(strategy_name: str, external_path: str | None = None) -> type[BaseStrategy]:
     """加载策略类。
 
     Args:
@@ -91,14 +91,14 @@ def load_strategy(strategy_name: str, external_path: Optional[str] = None) -> Ty
 
 
 def create_strategy(
-    strategy_name: str, external_path: Optional[str] = None, **params
+    strategy_name: str, external_path: str | None = None, **params
 ) -> BaseStrategy:
     """加载策略类并用 ``params`` 实例化（便捷封装）。"""
     cls = load_strategy(strategy_name, external_path)
     return cls(**params)
 
 
-def list_examples() -> List[str]:
+def list_examples() -> list[str]:
     """列出内置示例包 ``examples`` 中可加载的策略模块名（文件名，不含 .py）。"""
     try:
         examples = importlib.import_module(f"{__package__}.examples")
@@ -147,15 +147,13 @@ def _load_module_from_path(name: str, external_path: str):
     sys.modules[mod_name] = module  # 注册，便于 dataclass / pickling
     try:
         spec.loader.exec_module(module)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         sys.modules.pop(mod_name, None)
         raise StrategyLoadError(f"执行策略文件 {file_path} 失败: {type(exc).__name__}: {exc}") from exc
     finally:
         if added:
-            try:
+            with contextlib.suppress(ValueError):
                 sys.path.remove(search_str)
-            except ValueError:
-                pass
     return module
 
 
@@ -178,9 +176,9 @@ def _load_example_module(name: str):
 # ============================================================
 
 
-def _strategy_candidates(module) -> List[Type[BaseStrategy]]:
+def _strategy_candidates(module) -> list[type[BaseStrategy]]:
     """模块内"自身定义"的 BaseStrategy 子类（排除 import 进来的基类）。"""
-    out: List[Type[BaseStrategy]] = []
+    out: list[type[BaseStrategy]] = []
     for _, obj in inspect.getmembers(module, inspect.isclass):
         if (
             issubclass(obj, BaseStrategy)
@@ -195,7 +193,7 @@ def _norm(s: str) -> str:
     return str(s).replace("_", "").replace("-", "").lower()
 
 
-def _find_strategy_class(module, name: str) -> Type[BaseStrategy]:
+def _find_strategy_class(module, name: str) -> type[BaseStrategy]:
     """在模块内按优先级定位唯一的 BaseStrategy 子类。"""
     # 1. 精确同名类
     direct = getattr(module, name, None)

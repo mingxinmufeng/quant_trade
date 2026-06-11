@@ -31,9 +31,10 @@ T+1 滞后，杜绝未来函数。
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -47,10 +48,10 @@ from ..utils.helpers import (
     safe_divide,
     truncate_to_100,
 )
-from .execution import ExecutionEngine, Order, OrderStatus
+from .execution import ExecutionEngine, Order
 from .portfolio import Portfolio
 
-__all__ = ["Trade", "BacktestResult", "Backtester"]
+__all__ = ["BacktestResult", "Backtester", "Trade"]
 
 #: 年交易日数
 TRADING_DAYS_PER_YEAR = 252
@@ -64,8 +65,8 @@ class Trade:
     """一笔完整交易（一买一卖，均价法）。"""
 
     code: str
-    entry_date: Optional[date]
-    exit_date: Optional[date]
+    entry_date: date | None
+    exit_date: date | None
     entry_price: float
     exit_price: float
     shares: int
@@ -95,7 +96,7 @@ class BacktestResult:
     beta: float
     # 明细
     equity_curve: pd.Series
-    trades: List[Trade]
+    trades: list[Trade]
     daily_positions: pd.DataFrame
 
     def summary(self) -> str:
@@ -125,11 +126,11 @@ class Backtester:
     def __init__(
         self,
         config: Any = None,
-        execution: Optional[ExecutionEngine] = None,
+        execution: ExecutionEngine | None = None,
         calendar: Any = None,
         fetcher: Any = None,
-        risk_manager: Optional[Any] = None,
-        position_size: Optional[float] = None,
+        risk_manager: Any | None = None,
+        position_size: float | None = None,
         apply_corporate_actions: bool = False,
     ) -> None:
         self.config = config
@@ -157,11 +158,11 @@ class Backtester:
     def run(
         self,
         strategy: BaseStrategy,
-        start: Union[str, date, datetime],
-        end: Union[str, date, datetime],
-        data: Optional[Dict[str, pd.DataFrame]] = None,
-        codes: Optional[Sequence[str]] = None,
-        benchmark: Optional[pd.Series] = None,
+        start: str | date | datetime,
+        end: str | date | datetime,
+        data: dict[str, pd.DataFrame] | None = None,
+        codes: Sequence[str] | None = None,
+        benchmark: pd.Series | None = None,
     ) -> BacktestResult:
         """运行回测。
 
@@ -196,9 +197,9 @@ class Backtester:
         indexed = {code: df.set_index("date") for code, df in data.items()}
 
         pf = Portfolio(self.initial_capital, t1_cash_freeze=self.t1_cash_freeze)
-        equity_dates: List[date] = []
-        equity_values: List[float] = []
-        positions_log: List[Dict[str, int]] = []
+        equity_dates: list[date] = []
+        equity_values: list[float] = []
+        positions_log: list[dict[str, int]] = []
 
         for i, day in enumerate(trading_days):
             pf.settle_new_day()  # 解冻 T+1
@@ -231,16 +232,16 @@ class Backtester:
     # 数据准备
     # ------------------------------------------------------------
 
-    def _load_data(self, codes: Optional[Sequence[str]], s: date, e: date) -> Dict[str, pd.DataFrame]:
+    def _load_data(self, codes: Sequence[str] | None, s: date, e: date) -> dict[str, pd.DataFrame]:
         if self.fetcher is None or not codes:
             raise ValueError("run() 未提供 data，且 fetcher/codes 不足以加载数据")
         logger.info(f"通过 fetcher 加载 {len(codes)} 只股票 {s}~{e} 数据（hfq）")
         return self.fetcher.load_batch(list(codes), s, e, adjust="hfq")
 
     @staticmethod
-    def _prepare_data(data: Dict[str, pd.DataFrame], s: date, e: date) -> Dict[str, pd.DataFrame]:
+    def _prepare_data(data: dict[str, pd.DataFrame], s: date, e: date) -> dict[str, pd.DataFrame]:
         """裁剪区间、规整 date、剔除空表。"""
-        out: Dict[str, pd.DataFrame] = {}
+        out: dict[str, pd.DataFrame] = {}
         ts, te = pd.Timestamp(s), pd.Timestamp(e)
         for code, df in data.items():
             if df is None or df.empty or "date" not in df.columns or "close" not in df.columns:
@@ -256,7 +257,7 @@ class Backtester:
             out[code] = d
         return out
 
-    def _trading_days(self, data: Dict[str, pd.DataFrame], s: date, e: date) -> List[pd.Timestamp]:
+    def _trading_days(self, data: dict[str, pd.DataFrame], s: date, e: date) -> list[pd.Timestamp]:
         if self.calendar is not None:
             return [pd.Timestamp(d) for d in self.calendar.get_trading_days(s, e)]
         # 退化：用全部数据日期并集
@@ -266,7 +267,7 @@ class Backtester:
         return list(all_dates.normalize().unique().sort_values())
 
     @staticmethod
-    def _align_signals(signals: pd.DataFrame, days: List[pd.Timestamp], codes: List[str]) -> pd.DataFrame:
+    def _align_signals(signals: pd.DataFrame, days: list[pd.Timestamp], codes: list[str]) -> pd.DataFrame:
         if signals is None or signals.empty:
             return pd.DataFrame(int(Signal.HOLD), index=pd.DatetimeIndex(days), columns=codes, dtype="int64")
         sig = signals.copy()
@@ -312,21 +313,21 @@ class Backtester:
             self.execution.match(order, bar, pf)
 
     @staticmethod
-    def _bar(indexed: Dict[str, pd.DataFrame], code: str, day: pd.Timestamp) -> Optional[Dict[str, Any]]:
+    def _bar(indexed: dict[str, pd.DataFrame], code: str, day: pd.Timestamp) -> dict[str, Any] | None:
         df = indexed.get(code)
         if df is None or day not in df.index:
             return None
         row = df.loc[day]
         if isinstance(row, pd.DataFrame):  # 重复索引兜底
             row = row.iloc[-1]
-        bar: Dict[str, Any] = {"date": day.date()}
+        bar: dict[str, Any] = {"date": day.date()}
         for c in _BAR_COLS:
             bar[c] = row[c] if c in row.index else (False if c == "is_suspended" else np.nan)
         return bar
 
     @staticmethod
-    def _close_prices(indexed: Dict[str, pd.DataFrame], day: pd.Timestamp) -> Dict[str, float]:
-        out: Dict[str, float] = {}
+    def _close_prices(indexed: dict[str, pd.DataFrame], day: pd.Timestamp) -> dict[str, float]:
+        out: dict[str, float] = {}
         for code, df in indexed.items():
             if day in df.index:
                 row = df.loc[day]
@@ -352,11 +353,11 @@ class Backtester:
     # ------------------------------------------------------------
 
     @staticmethod
-    def _positions_frame(dates: List[date], logs: List[Dict[str, int]]) -> pd.DataFrame:
+    def _positions_frame(dates: list[date], logs: list[dict[str, int]]) -> pd.DataFrame:
         all_codes = sorted({c for d in logs for c in d})
         frame = pd.DataFrame(0, index=pd.DatetimeIndex(dates), columns=all_codes, dtype="int64")
         frame.index.name = "date"
-        for i, d in enumerate(dates):
+        for i, _d in enumerate(dates):
             for code, sh in logs[i].items():
                 frame.iat[i, frame.columns.get_loc(code)] = sh
         return frame
@@ -364,9 +365,9 @@ class Backtester:
     def _compute_metrics(
         self,
         equity_curve: pd.Series,
-        trades: List[Trade],
+        trades: list[Trade],
         daily_positions: pd.DataFrame,
-        benchmark: Optional[pd.Series],
+        benchmark: pd.Series | None,
     ) -> BacktestResult:
         eq = equity_curve.to_numpy(dtype="float64")
         returns = pd.Series(eq).pct_change().dropna()

@@ -37,10 +37,10 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime
-from enum import Enum
-from typing import Any, Dict, Optional, Union
+from enum import StrEnum
+from typing import Any
 
 from loguru import logger
 
@@ -48,12 +48,12 @@ from ..strategy.base import Signal
 from ..utils.helpers import truncate_to_100
 from .portfolio import Portfolio
 
-__all__ = ["OrderStatus", "Order", "ExecutionEngine"]
+__all__ = ["ExecutionEngine", "Order", "OrderStatus"]
 
 _EPS = 1e-9
 
 
-class OrderStatus(str, Enum):
+class OrderStatus(StrEnum):
     """订单状态。"""
 
     PENDING = "pending"     # 待撮合
@@ -70,7 +70,7 @@ class Order:
     code: str
     direction: int                      # Signal.BUY(1) / Signal.SELL(-1)
     shares: int                         # 期望股数（买入为目标股数；卖出为期望卖出股数）
-    trade_date: Optional[date] = None
+    trade_date: date | None = None
     status: OrderStatus = OrderStatus.PENDING
     filled_shares: int = 0
     fill_price: float = 0.0
@@ -107,7 +107,7 @@ class ExecutionEngine:
         commission_rate: float = 0.00025,
         stamp_duty: float = 0.0005,
         min_commission: float = 5.0,
-        risk_manager: Optional[Any] = None,
+        risk_manager: Any | None = None,
     ) -> None:
         self.slippage_type = str(slippage_type).lower().strip()
         if self.slippage_type not in ("fixed", "percent", "open_gap"):
@@ -125,7 +125,7 @@ class ExecutionEngine:
         self.risk_manager = risk_manager
 
     @classmethod
-    def from_config(cls, config: Any, risk_manager: Optional[Any] = None) -> "ExecutionEngine":
+    def from_config(cls, config: Any, risk_manager: Any | None = None) -> ExecutionEngine:
         """从全局配置（含 ``execution`` 与 ``risk`` 段）构造。"""
         ex = _section(config, "execution")
         rk = _section(config, "risk")
@@ -149,7 +149,7 @@ class ExecutionEngine:
     # 价格：执行价（成交价）
     # ------------------------------------------------------------
 
-    def execution_price(self, bar: Dict[str, float], is_buy: bool) -> float:
+    def execution_price(self, bar: dict[str, float], is_buy: bool) -> float:
         """根据 ``mode``/滑点/tick 计算成交价。
 
         ``mode='close'`` 用当日收盘价为基准，否则用开盘价（次日开盘撮合，默认）。
@@ -188,7 +188,7 @@ class ExecutionEngine:
         except (TypeError, ValueError):
             return True
 
-    def _is_tradable(self, bar: Dict[str, float]) -> bool:
+    def _is_tradable(self, bar: dict[str, float]) -> bool:
         """停牌或无有效开盘价 → 不可成交。"""
         if bool(bar.get("is_suspended", False)):
             return False
@@ -200,7 +200,7 @@ class ExecutionEngine:
         """一字板比较容差：tick 与相对 1‰ 取大。"""
         return max(self.tick_size * 0.5, abs(ref) * 1e-3)
 
-    def is_one_word_up(self, bar: Dict[str, float]) -> bool:
+    def is_one_word_up(self, bar: dict[str, float]) -> bool:
         """涨停一字板：``high==low`` 且贴着 ``limit_up``。"""
         hi, lo, lu = bar.get("high"), bar.get("low"), bar.get("limit_up")
         if any(self._is_nan(v) for v in (hi, lo, lu)):
@@ -208,7 +208,7 @@ class ExecutionEngine:
         hi, lo, lu = float(hi), float(lo), float(lu)
         return abs(hi - lo) <= self._tol(hi) and abs(hi - lu) <= self._tol(lu)
 
-    def is_one_word_down(self, bar: Dict[str, float]) -> bool:
+    def is_one_word_down(self, bar: dict[str, float]) -> bool:
         """跌停一字板：``high==low`` 且贴着 ``limit_down``。"""
         hi, lo, ld = bar.get("high"), bar.get("low"), bar.get("limit_down")
         if any(self._is_nan(v) for v in (hi, lo, ld)):
@@ -233,7 +233,7 @@ class ExecutionEngine:
     # 成交量上限
     # ------------------------------------------------------------
 
-    def _volume_cap(self, bar: Dict[str, float]) -> Optional[int]:
+    def _volume_cap(self, bar: dict[str, float]) -> int | None:
         """单笔可成交股数上限；无量信息返回 None（不限制）。"""
         vol = bar.get("volume")
         if self._is_nan(vol) or float(vol) <= 0 or self.volume_pct_limit <= 0:
@@ -244,7 +244,7 @@ class ExecutionEngine:
     # 撮合主入口
     # ------------------------------------------------------------
 
-    def match(self, order: Order, bar: Dict[str, float], portfolio: Portfolio) -> Order:
+    def match(self, order: Order, bar: dict[str, float], portfolio: Portfolio) -> Order:
         """对单根 bar 撮合订单，更新 ``order`` 与 ``portfolio``，返回 ``order``。"""
         order.trade_date = order.trade_date or _to_date(bar.get("date"))
         if not self._is_tradable(bar):
@@ -259,7 +259,7 @@ class ExecutionEngine:
                 return self._set(order, OrderStatus.FAILED, "跌停一字板，卖出无法成交")
             return self._match_sell(order, bar, portfolio)
 
-    def _match_buy(self, order: Order, bar: Dict[str, float], pf: Portfolio) -> Order:
+    def _match_buy(self, order: Order, bar: dict[str, float], pf: Portfolio) -> Order:
         px = self.execution_price(bar, is_buy=True)
         target = int(order.shares)
         cap = self._volume_cap(bar)
@@ -287,7 +287,7 @@ class ExecutionEngine:
         pf.buy(order.code, target, px, fee, order.trade_date)
         return self._fill(order, target, px, fee, partial=target < int(order.shares))
 
-    def _match_sell(self, order: Order, bar: Dict[str, float], pf: Portfolio) -> Order:
+    def _match_sell(self, order: Order, bar: dict[str, float], pf: Portfolio) -> Order:
         pos = pf.get_position(order.code)
         if pos is None or pos.available <= 0:
             return self._set(order, OrderStatus.FAILED, "无可卖持仓（或 T+1 冻结）")
@@ -397,7 +397,7 @@ def _get(cfg: Any, key: str, default: Any) -> Any:
     return getattr(cfg, key, default)
 
 
-def _to_date(d: Union[str, date, datetime, None]) -> Optional[date]:
+def _to_date(d: str | date | datetime | None) -> date | None:
     if d is None:
         return None
     if isinstance(d, datetime):

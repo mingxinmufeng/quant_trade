@@ -13,12 +13,12 @@ from .execution import ExecutionEngine, Order, OrderStatus
 from .portfolio import Portfolio, Position
 
 __all__ = [
-    "Backtester",
     "BacktestResult",
-    "Trade",
+    "Backtester",
     "ExecutionEngine",
     "Order",
     "OrderStatus",
     "Portfolio",
     "Position",
+    "Trade",
 ]

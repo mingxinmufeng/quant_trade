@@ -12,7 +12,6 @@ from __future__ import annotations
 import random
 import time
 from datetime import date
-from typing import List
 
 import numpy as np
 import pandas as pd
@@ -49,7 +48,7 @@ class AkshareSource(DataSourceBase):
             f"[{code}] akshare 首拉保护：区间 {span} 天 > {AK_CHUNK_THRESHOLD_DAYS}，"
             f"按 {AK_CHUNK_YEARS} 年分片串行拉取"
         )
-        parts: List[pd.DataFrame] = []
+        parts: list[pd.DataFrame] = []
         cur, first = start, True
         while cur <= end:
             seg_end = min(date(cur.year + AK_CHUNK_YEARS, 1, 1) - pd.Timedelta(days=1), end)
@@ -72,7 +71,7 @@ class AkshareSource(DataSourceBase):
                 df = fn(code, start, end)
             except ProxyConfigError:
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning(f"[{code}] akshare 日线子源 {fn.__name__} 失败: {exc}")
                 continue
             if df is not None and not df.empty:
@@ -81,7 +80,7 @@ class AkshareSource(DataSourceBase):
         return pd.DataFrame()
 
     def _daily_em(self, code: str, start: date, end: date) -> pd.DataFrame:
-        import akshare as ak  # noqa: WPS433
+        import akshare as ak
         symbol = format_code(code).split(".")[0]
         df = _ak_call(
             ak.stock_zh_a_hist, code=code,
@@ -99,7 +98,7 @@ class AkshareSource(DataSourceBase):
         return self._finalize_daily(df)
 
     def _daily_sina(self, code: str, start: date, end: date) -> pd.DataFrame:
-        import akshare as ak  # noqa: WPS433
+        import akshare as ak
         self._sleep(AK_CALL_SLEEP)
         df = _ak_call(
             ak.stock_zh_a_daily, code=code,
@@ -113,7 +112,7 @@ class AkshareSource(DataSourceBase):
         return self._finalize_daily(df)
 
     def _daily_tx(self, code: str, start: date, end: date) -> pd.DataFrame:
-        import akshare as ak  # noqa: WPS433
+        import akshare as ak
         self._sleep(AK_CALL_SLEEP)
         df = _ak_call(
             ak.stock_zh_a_hist_tx, code=code,
@@ -151,7 +150,7 @@ class AkshareSource(DataSourceBase):
                 df = fn(code, period, start, end)
             except ProxyConfigError:
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning(f"[{code}] akshare {period}分钟子源 {fn.__name__} 失败: {exc}")
                 continue
             if df is not None and not df.empty:
@@ -159,7 +158,7 @@ class AkshareSource(DataSourceBase):
         return pd.DataFrame()
 
     def _minute_em(self, code: str, period: str, start: date, end: date) -> pd.DataFrame:
-        import akshare as ak  # noqa: WPS433
+        import akshare as ak
         symbol = format_code(code).split(".")[0]
         df = _ak_call(
             ak.stock_zh_a_hist_min_em, code=code,
@@ -178,7 +177,7 @@ class AkshareSource(DataSourceBase):
         return self._finalize_minute(df)
 
     def _minute_sina(self, code: str, period: str, start: date, end: date) -> pd.DataFrame:
-        import akshare as ak  # noqa: WPS433
+        import akshare as ak
         self._sleep(AK_CALL_SLEEP)
         df = _ak_call(
             ak.stock_zh_a_minute, code=code,

@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 #: 支持 resample 落地的「日线以上」周期 → pandas 偏移别名

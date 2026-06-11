@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from datetime import date
-from typing import Optional
 
 import pandas as pd
 
@@ -15,11 +14,11 @@ from .base import DataSourceBase
 class TushareSource(DataSourceBase):
     name = "tushare"
 
-    def __init__(self, token: Optional[str] = None) -> None:
+    def __init__(self, token: str | None = None) -> None:
         self._token = token or os.environ.get("TUSHARE_TOKEN", "").strip()
         if not self._token:
             raise RuntimeError("tushare 数据源需要 TUSHARE_TOKEN 环境变量或显式 token")
-        import tushare as ts  # noqa: WPS433
+        import tushare as ts
         ts.set_token(self._token)
         self._pro = ts.pro_api()
 

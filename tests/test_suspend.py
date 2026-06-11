@@ -28,7 +28,6 @@ if str(_REPO_ROOT) not in sys.path:
 
 from src.data.suspend import SuspendProvider, _norm_code  # noqa: E402
 
-
 # ============================================================
 # _norm_code
 # ============================================================

@@ -15,8 +15,8 @@ from .loader import StrategyLoadError, create_strategy, list_examples, load_stra
 
 __all__ = [
     "BaseStrategy",
-    "Signal",
     "MaRsiStrategy",
+    "Signal",
     "StrategyLoadError",
     "create_strategy",
     "list_examples",

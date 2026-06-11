@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import threading
 from datetime import date
-from typing import List
 
 import pandas as pd
 
@@ -31,14 +30,14 @@ class BaostockSource(DataSourceBase):
     def _ensure_login(self) -> None:
         if self._logged_in:
             return
-        import baostock as bs  # noqa: WPS433
+        import baostock as bs
         rs = bs.login()
         if getattr(rs, "error_code", "0") != "0":
             raise RuntimeError(f"baostock 登录失败: {rs.error_msg}")
         self._logged_in = True
 
     def fetch_daily(self, code: str, start: date, end: date) -> pd.DataFrame:
-        import baostock as bs  # noqa: WPS433
+        import baostock as bs
         if format_code(code).endswith(".BJ"):
             return pd.DataFrame()  # baostock 不覆盖北交所
         with self._LOCK:
@@ -51,7 +50,7 @@ class BaostockSource(DataSourceBase):
             )
             if getattr(rs, "error_code", "0") != "0":
                 raise RuntimeError(f"baostock 查询失败: {rs.error_msg}")
-            rows: List[List[str]] = []
+            rows: list[list[str]] = []
             while rs.next():
                 rows.append(rs.get_row_data())
         if not rows:

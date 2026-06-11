@@ -34,10 +34,11 @@ from __future__ import annotations
 
 import random
 import time
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
@@ -52,13 +53,7 @@ from ..utils.helpers import (
 )
 from .factors import FactorCalculator, FactorProvider
 from .gbbq import GbbqStore
-from .suspend import (
-    DEFAULT_SUSPEND_LOOKBACK_DAYS,
-    DEFAULT_SUSPEND_SOURCES,
-    SuspendProvider,
-)
 from .resample import (  # 重导出，保持向后兼容
-    DAILY_RESAMPLE_RULES,
     resample_daily,
     resample_minute,
 )
@@ -68,11 +63,10 @@ from .sources import (
     BaostockSource,
     DataFetchError,
     DataSourceBase,
-    PytdxLocalSource,
     ProxyConfigError,
+    PytdxLocalSource,
     TushareSource,
     _ak_call,
-    _auto_discover_tdx_path,
     build_source,
 )
 from .storage import (  # 重导出，保持向后兼容
@@ -80,6 +74,11 @@ from .storage import (  # 重导出，保持向后兼容
     FREQ_DIRS,
     MINUTE_COLUMNS,
     DataStore,
+)
+from .suspend import (
+    DEFAULT_SUSPEND_LOOKBACK_DAYS,
+    DEFAULT_SUSPEND_SOURCES,
+    SuspendProvider,
 )
 from .trading_calendar import TradingCalendar
 
@@ -95,15 +94,15 @@ EARLIEST_DATE = date(1990, 12, 19)
 
 __all__ = [
     "DAILY_COLUMNS",
-    "MINUTE_COLUMNS",
-    "FREQ_DIRS",
     "DEFAULT_SOURCES",
-    "DataFetcher",
+    "FREQ_DIRS",
+    "MINUTE_COLUMNS",
     "DataFetchError",
-    "ProxyConfigError",
-    "FactorProvider",
+    "DataFetcher",
     "FactorCalculator",
+    "FactorProvider",
     "GbbqStore",
+    "ProxyConfigError",
     "resample_daily",
     "resample_minute",
 ]
@@ -147,16 +146,16 @@ def _backfill_limit_df(df: pd.DataFrame, limit_pct: float) -> pd.DataFrame:
 class DataFetcher:
     """多源容灾 + 多周期 + 增量更新 + 原始/因子分离落盘的行情拉取器。"""
 
-    _STOCK_NAME_CACHE: Dict[str, str] = {}
+    _STOCK_NAME_CACHE: ClassVar[dict[str, str]] = {}
 
     def __init__(
         self,
-        store_path: Union[str, Path] = "data_store",
+        store_path: str | Path = "data_store",
         sources: Sequence[str] = DEFAULT_SOURCES,
         retry_times: int = DEFAULT_RETRY_TIMES,
         retry_delays: Sequence[float] = DEFAULT_RETRY_DELAYS,
-        calendar: Optional[TradingCalendar] = None,
-        tdx_path: Optional[str] = None,
+        calendar: TradingCalendar | None = None,
+        tdx_path: str | None = None,
         jitter: float = 0.3,
         factor_source: str = "sina",
         max_workers: int = DEFAULT_MAX_WORKERS,
@@ -165,7 +164,7 @@ class DataFetcher:
         suspend_sources: Sequence[str] = DEFAULT_SUSPEND_SOURCES,
         suspend_lookback_days: int = DEFAULT_SUSPEND_LOOKBACK_DAYS,
         suspend_enabled: bool = True,
-        selfheal_window: Optional[int] = None,  # 已废弃：原始/因子分离后无需自愈
+        selfheal_window: int | None = None,  # 已废弃：原始/因子分离后无需自愈
     ) -> None:
         import threading
 
@@ -180,7 +179,7 @@ class DataFetcher:
         self._max_workers = max(1, int(max_workers))
         if selfheal_window is not None:
             logger.debug("selfheal_window 参数已废弃（原始/因子分离后无需自愈），忽略")
-        self._sources_cache: Dict[str, Optional[DataSourceBase]] = {}
+        self._sources_cache: dict[str, DataSourceBase | None] = {}
         # 本地 gbbq（权息）：自算因子的数据来源、因子刷新触发器；事件快照落盘到 store 根下
         self._gbbq = GbbqStore(
             tdx_path=self._tdx_path,
@@ -212,9 +211,9 @@ class DataFetcher:
         self._source_lock = threading.Lock()
         self._name_lock = threading.Lock()
         # update() 时预热：全市场 gbbq 最近除权除息日字典（避免逐股 O(N) 过滤）
-        self._gbbq_event_cache: Dict[str, Optional[pd.Timestamp]] = {}
+        self._gbbq_event_cache: dict[str, pd.Timestamp | None] = {}
 
-    def _resolve_use_gbbq(self, factor_source: Optional[str]) -> bool:
+    def _resolve_use_gbbq(self, factor_source: str | None) -> bool:
         """解析加载所用因子口径：None→实例默认；'gbbq'→True，其余→False。"""
         src = (factor_source if factor_source is not None else self._load_factor_source)
         return str(src).strip().lower() == "gbbq"
@@ -225,11 +224,11 @@ class DataFetcher:
 
     def update(
         self,
-        codes: Optional[Sequence[str]] = None,
+        codes: Sequence[str] | None = None,
         freqs: Sequence[str] = ("daily", "min5", "min1"),
         throttle: float = 0.0,
         progress_every: int = 200,
-        max_workers: Optional[int] = None,
+        max_workers: int | None = None,
     ) -> None:
         """增量更新本地原始缓存（日线 / 5 分钟 / 1 分钟）并刷新复权因子表。
 
@@ -265,13 +264,13 @@ class DataFetcher:
         if "pytdx" in self._source_names:
             try:
                 self._get_source("pytdx")
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.debug(f"pytdx 源预热跳过: {exc}")
         # gbbq 事件快照：解析一次并按版本戳落盘（供本次及后续进程免重复解析）
         if self._gbbq.available:
             try:
                 self._gbbq.save_snapshot()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.debug(f"gbbq 事件快照写盘跳过: {exc}")
             # 预热全市场除权除息日字典（一次 groupby，_should_skip_factor 走 O(1) 缓存）
             self._prewarm_gbbq_event_cache()
@@ -348,7 +347,7 @@ class DataFetcher:
             for d in days:
                 self._suspend.get_suspended_set(d)
             logger.debug(f"停牌缓存预热完成（{len(days)} 个交易日）")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug(f"停牌缓存预热失败，不影响主流程: {exc}")
 
     def _prewarm_gbbq_event_cache(self) -> None:
@@ -358,7 +357,7 @@ class DataFetcher:
         try:
             self._gbbq_event_cache = self._gbbq.last_event_dates_all()
             logger.debug(f"gbbq 事件缓存预热完成（{len(self._gbbq_event_cache)} 只股票）")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug(f"gbbq 事件缓存预热失败，回退逐股查询: {exc}")
             self._gbbq_event_cache = {}
 
@@ -387,7 +386,7 @@ class DataFetcher:
                 last_ev = self._gbbq_event_cache.get(code)
             else:
                 last_ev = self._gbbq.last_event_date(code)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug(f"[{code}] gbbq 事件查询失败，不跳过因子刷新: {exc}")
             return False
         stored_max = pd.to_datetime(existing["date"]).max()
@@ -411,7 +410,7 @@ class DataFetcher:
             factor = self._factor_engine.get_factor(code)
         except ProxyConfigError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(f"[{code}] 复权因子刷新失败（保留旧因子）: {exc}")
             return
         if factor is not None and not factor.empty:
@@ -429,7 +428,7 @@ class DataFetcher:
             return
         try:
             factor = self._gbbq_calc.get_factor(code)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug(f"[{code}] gbbq 自算因子刷新失败（保留旧记录）: {exc}")
             return
         if factor is not None and not factor.empty:
@@ -443,12 +442,12 @@ class DataFetcher:
     def load_daily(
         self,
         code: str,
-        start: Union[str, date, datetime],
-        end: Union[str, date, datetime],
+        start: str | date | datetime,
+        end: str | date | datetime,
         period: str = "daily",
         adjust: str = "hfq",
-        anchor_date: Optional[Union[str, date, datetime]] = None,
-        factor_source: Optional[str] = None,
+        anchor_date: str | date | datetime | None = None,
+        factor_source: str | None = None,
     ) -> pd.DataFrame:
         """加载日线或日线以上周期（周/月/季/年由 daily resample 生成）。
 
@@ -471,11 +470,11 @@ class DataFetcher:
         self,
         code: str,
         period: str,
-        start: Union[str, date, datetime],
-        end: Union[str, date, datetime],
+        start: str | date | datetime,
+        end: str | date | datetime,
         adjust: str = "hfq",
-        anchor_date: Optional[Union[str, date, datetime]] = None,
-        factor_source: Optional[str] = None,
+        anchor_date: str | date | datetime | None = None,
+        factor_source: str | None = None,
     ) -> pd.DataFrame:
         """加载分钟线（按需复权）。
 
@@ -506,14 +505,14 @@ class DataFetcher:
     def load_batch(
         self,
         codes: Sequence[str],
-        start: Union[str, date, datetime],
-        end: Union[str, date, datetime],
+        start: str | date | datetime,
+        end: str | date | datetime,
         adjust: str = "hfq",
-        anchor_date: Optional[Union[str, date, datetime]] = None,
-        factor_source: Optional[str] = None,
-    ) -> Dict[str, pd.DataFrame]:
+        anchor_date: str | date | datetime | None = None,
+        factor_source: str | None = None,
+    ) -> dict[str, pd.DataFrame]:
         """批量加载日线；缺失的代码跳过并 WARNING。"""
-        result: Dict[str, pd.DataFrame] = {}
+        result: dict[str, pd.DataFrame] = {}
         for code in codes:
             std = format_code(code)
             try:
@@ -525,7 +524,7 @@ class DataFetcher:
                 logger.warning(str(exc))
         return result
 
-    def list_market_codes(self, include_bse: bool = True) -> List[str]:
+    def list_market_codes(self, include_bse: bool = True) -> list[str]:
         """返回全市场 A 股代码清单（akshare ``stock_info_a_code_name``，独立于本地包）。"""
         self._ensure_stock_name_table()
         codes = list(self._STOCK_NAME_CACHE.keys())
@@ -629,7 +628,7 @@ class DataFetcher:
         """该股票的涨跌停比例（依赖 ST 状态 + 板块）。"""
         try:
             name = self._get_stock_name(code)
-        except Exception:  # noqa: BLE001
+        except Exception:
             name = ""
         is_st = bool(name) and ("ST" in name.upper())
         return get_limit_pct(code, is_st=is_st)
@@ -640,11 +639,11 @@ class DataFetcher:
 
     def _fetch_with_fallback(
         self, code: str, start: date, end: date, kind: str,
-    ) -> Tuple[pd.DataFrame, str]:
+    ) -> tuple[pd.DataFrame, str]:
         """按源优先级串行尝试。``kind`` ∈ {"daily","1","5"}。"""
         names = tuple(self._source_names)
-        fetch_exc: Optional[Exception] = None
-        last_exc: Optional[Exception] = None
+        fetch_exc: Exception | None = None
+        last_exc: Exception | None = None
         did_fetch = False
 
         for src_name in names:
@@ -658,7 +657,7 @@ class DataFetcher:
             if kind != "daily" and not src.supports_minute:
                 continue
 
-            def _call():
+            def _call(src=src):
                 if kind == "daily":
                     return src.fetch_daily(code, start, end)
                 return src.fetch_minute(code, kind, start, end)
@@ -670,7 +669,7 @@ class DataFetcher:
                     df = pd.DataFrame()
             except ProxyConfigError:
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 fetch_exc = exc
                 last_exc = exc
                 logger.warning(f"[{code}] 源 {src_name} 重试耗尽: {type(exc).__name__}: {exc}")
@@ -742,7 +741,7 @@ class DataFetcher:
         prev_ref = df["close"].shift(1)
         try:
             stock_name = self._get_stock_name(code)
-        except Exception:  # noqa: BLE001
+        except Exception:
             stock_name = ""
         is_st = bool(stock_name) and ("ST" in stock_name.upper())
         limit_pct = get_limit_pct(code, is_st=is_st)
@@ -780,7 +779,7 @@ class DataFetcher:
             try:
                 if std not in self._suspend.get_suspended_set(d):
                     return False
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.debug(f"[{std}] 停牌名单查询 {d} 失败，按未停牌处理: {exc}")
                 return False
         return True
@@ -805,7 +804,7 @@ class DataFetcher:
             try:
                 if std in self._suspend.get_suspended_set(d):
                     confirmed.at[i] = True
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.debug(f"[{std}] 停牌名单查询 {d} 失败: {exc}")
         return confirmed
 
@@ -845,7 +844,7 @@ class DataFetcher:
         return self._cast_types(df, MINUTE_COLUMNS).sort_values("datetime").reset_index(drop=True)
 
     @staticmethod
-    def _cast_types(df: pd.DataFrame, schema: Dict[str, str]) -> pd.DataFrame:
+    def _cast_types(df: pd.DataFrame, schema: dict[str, str]) -> pd.DataFrame:
         for col, dtype in schema.items():
             if dtype.startswith("datetime"):
                 df[col] = pd.to_datetime(df[col])
@@ -868,17 +867,17 @@ class DataFetcher:
             if self._STOCK_NAME_CACHE:  # 等锁期间已被别的线程填充
                 return
             try:
-                import akshare as ak  # noqa: WPS433
+                import akshare as ak
                 df = _ak_call(ak.stock_info_a_code_name)
                 if df is not None and not df.empty:
                     # 向量化构建，比 iterrows() 快 10x+
                     self._STOCK_NAME_CACHE.update({
                         format_code(str(c)): str(n)
-                        for c, n in zip(df["code"].tolist(), df["name"].tolist())
+                        for c, n in zip(df["code"].tolist(), df["name"].tolist(), strict=True)
                     })
             except ProxyConfigError:
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning(f"加载股票名称表失败: {exc}")
 
     def _get_stock_name(self, code: str) -> str:
@@ -906,7 +905,7 @@ class DataFetcher:
 #   python -m src.data.fetcher                      # 全市场增量（日线+5min+1min）
 
 
-def _selftest(tdx_path: Optional[str] = None, level: str = "INFO") -> int:
+def _selftest(tdx_path: str | None = None, level: str = "INFO") -> int:
     """逐源连通性自测：验证每个数据源在样例股票上能否取到有效数据。"""
     from datetime import timedelta
 
@@ -933,7 +932,7 @@ def _selftest(tdx_path: Optional[str] = None, level: str = "INFO") -> int:
         except ProxyConfigError as exc:
             ok_all = False
             logger.error(f"✗ {label}: 代理错误 → {exc}")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             ok_all = False
             logger.error(f"✗ {label}: {type(exc).__name__}: {exc}")
 
@@ -946,7 +945,7 @@ def _selftest(tdx_path: Optional[str] = None, level: str = "INFO") -> int:
         _try("pytdx 5分钟 000001", lambda: pytdx.fetch_minute(sample_daily, "5", start_5d, end))
         _try("pytdx 1分钟 000001", lambda: pytdx.fetch_minute(sample_daily, "1", start_3d, end))
         _try("pytdx 北交所 BJ 修复", lambda: pytdx.fetch_daily(sample_bj, start, end))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning(f"pytdx 不可用（未安装通达信/缺包）: {exc}")
 
     # 2) akshare（内部 东财/新浪/腾讯 容灾）
@@ -962,13 +961,13 @@ def _selftest(tdx_path: Optional[str] = None, level: str = "INFO") -> int:
     # 4) baostock
     try:
         _try("baostock 日线", lambda: BaostockSource().fetch_daily(sample_daily, start, end))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning(f"baostock 不可用: {exc}")
 
     # 5) tushare（需 token）
     try:
         _try("tushare 日线", lambda: TushareSource().fetch_daily(sample_daily, start, end))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning(f"tushare 跳过: {exc}")
 
     # 5b) 停牌名单（东财主源 + tushare 兜底）：用历史日 2020-03-12（已知有停牌）验证
@@ -979,7 +978,7 @@ def _selftest(tdx_path: Optional[str] = None, level: str = "INFO") -> int:
             lookback_days=10_000_000,  # 放开 lookback 以便拉取历史日
         )
         _try("停牌名单 2020-03-12", lambda: pd.Series(sorted(susp.get_suspended_set("2020-03-12"))))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning(f"停牌名单自测跳过: {exc}")
 
     # 6) gbbq 本地权息 + 自算因子（FactorCalculator）
@@ -1022,7 +1021,7 @@ def _selftest(tdx_path: Optional[str] = None, level: str = "INFO") -> int:
         })
         rw = resample_daily(dd, "weekly")
         logger.success(f"✓ resample daily→weekly: {len(rw)} 行")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         ok_all = False
         logger.error(f"✗ resample 自测失败: {exc}")
 
@@ -1032,6 +1031,7 @@ def _selftest(tdx_path: Optional[str] = None, level: str = "INFO") -> int:
 
 def _main() -> int:
     import argparse
+
     from ..utils.helpers import init_logging
 
     parser = argparse.ArgumentParser(description="A 股多周期数据拉取 / 增量更新 / 数据源自测")

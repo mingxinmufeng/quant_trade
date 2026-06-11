@@ -12,7 +12,7 @@ import struct
 import threading
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
@@ -52,7 +52,7 @@ _TDX_AUTO_DISCOVERY_CANDIDATES = (
 )
 
 
-def _auto_discover_tdx_path() -> Optional[str]:
+def _auto_discover_tdx_path() -> str | None:
     """扫描常见通达信安装位置，返回首个含 ``vipdoc`` 的有效路径。"""
     for candidate in _TDX_AUTO_DISCOVERY_CANDIDATES:
         if Path(candidate, "vipdoc").exists():
@@ -68,11 +68,11 @@ def _build_daily_reader():
     对 ``bj`` 文件抛 ``NotImplementedError``。子类在原逻辑前先判断 ``bj`` 前缀，
     识别为 ``BJ_A_STOCK``（价格/成交量系数与 A 股一致：[0.01, 0.01]）。
     """
-    from pytdx.reader import TdxDailyBarReader  # noqa: WPS433
+    from pytdx.reader import TdxDailyBarReader
 
     class _BJAwareDailyBarReader(TdxDailyBarReader):  # type: ignore[misc]
-        SECURITY_TYPE = list(TdxDailyBarReader.SECURITY_TYPE) + ["BJ_A_STOCK"]
-        SECURITY_COEFFICIENT = {
+        SECURITY_TYPE: ClassVar[list] = [*TdxDailyBarReader.SECURITY_TYPE, "BJ_A_STOCK"]
+        SECURITY_COEFFICIENT: ClassVar[dict[str, list[float]]] = {
             **TdxDailyBarReader.SECURITY_COEFFICIENT,
             "BJ_A_STOCK": [0.01, 0.01],
         }
@@ -96,7 +96,7 @@ class PytdxLocalSource(DataSourceBase):
     name = "pytdx"
     supports_minute = True
 
-    def __init__(self, tdx_path: Optional[str] = None) -> None:
+    def __init__(self, tdx_path: str | None = None) -> None:
         resolved = (tdx_path or "").strip() or _auto_discover_tdx_path()
         if not resolved:
             raise RuntimeError(
@@ -122,16 +122,16 @@ class PytdxLocalSource(DataSourceBase):
         if self._min_reader is None:
             with self._reader_lock:
                 if self._min_reader is None:
-                    from pytdx.reader import TdxLCMinBarReader  # noqa: WPS433
+                    from pytdx.reader import TdxLCMinBarReader
                     self._min_reader = TdxLCMinBarReader()
         return self._min_reader
 
-    def _vipdoc_path(self, market: str, subdir: str, fname: str) -> Optional[Path]:
+    def _vipdoc_path(self, market: str, subdir: str, fname: str) -> Path | None:
         """拼接 vipdoc 文件路径，不存在则返回 None。"""
         p = Path(self._tdx_path) / "vipdoc" / market / subdir / fname
         return p if p.exists() else None
 
-    def _resolve_daily_file(self, code: str) -> Optional[Path]:
+    def _resolve_daily_file(self, code: str) -> Path | None:
         """根据代码定位日线 .day 文件（含北交所）。"""
         sym = format_code(code).split(".")[0].lower()
         if sym.startswith(("sh", "sz", "bj")):
@@ -144,7 +144,7 @@ class PytdxLocalSource(DataSourceBase):
             bare = sym
         return self._vipdoc_path(market, "lday", f"{market}{bare}.day")
 
-    def _resolve_min_file(self, code: str, period: str) -> Optional[Path]:
+    def _resolve_min_file(self, code: str, period: str) -> Path | None:
         """根据代码和周期定位分钟线文件。"""
         sym = format_code(code).split(".")[0].lower()
         if sym.startswith(("sh", "sz", "bj")):
@@ -165,7 +165,7 @@ class PytdxLocalSource(DataSourceBase):
         # 任何异常（如未知证券类型）回退到 pytdx 全量解析，保证不丢数据。
         try:
             raw = self._read_tail(fpath, start, kind="daily")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug(f"[{code}] pytdx 日线尾部增量读取失败，回退全量解析: {exc}")
             raw = self._get_daily_reader().get_df(str(fpath))
         return self._slice(raw, start, end, time_col="date")
@@ -178,7 +178,7 @@ class PytdxLocalSource(DataSourceBase):
             return pd.DataFrame()
         try:
             raw = self._read_tail(fpath, start, kind="min")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug(f"[{code}] pytdx 分钟尾部增量读取失败，回退全量解析: {exc}")
             raw = self._get_min_reader().get_df(str(fpath))
         return self._slice(raw, start, end, time_col="datetime")
@@ -304,7 +304,7 @@ class PytdxLocalSource(DataSourceBase):
         for c in cols:
             if c not in df.columns:
                 df[c] = np.nan
-        df = df[[time_col] + cols].dropna(subset=[time_col])
+        df = df[[time_col, *cols]].dropna(subset=[time_col])
         s = pd.Timestamp(start)
         e = pd.Timestamp(end) + pd.Timedelta(days=1)  # 含 end 当日全部分钟
         df = df[(df[time_col] >= s) & (df[time_col] < e)].reset_index(drop=True)

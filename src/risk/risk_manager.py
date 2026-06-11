@@ -29,7 +29,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -66,12 +66,12 @@ class RiskManager:
         self.total_drawdown_stop = float(total_drawdown_stop)
 
         # 有状态字段
-        self._peak_equity: Optional[float] = None
-        self._day_start_equity: Optional[float] = None
+        self._peak_equity: float | None = None
+        self._day_start_equity: float | None = None
         self._halted: bool = False   # 累计回撤熔断后置位
 
     @classmethod
-    def from_config(cls, config: Any) -> "RiskManager":
+    def from_config(cls, config: Any) -> RiskManager:
         """从全局配置的 ``risk`` 段构造。"""
         rk = config.get("risk", config) if hasattr(config, "get") else (config or {})
 
@@ -112,7 +112,7 @@ class RiskManager:
         self._day_start_equity = eq
         self._halted = False
 
-    def on_new_day(self, portfolio: "Portfolio") -> None:
+    def on_new_day(self, portfolio: Portfolio) -> None:
         """每个交易日开盘调用：记录当日起点权益并刷新历史峰值。"""
         eq = float(portfolio.total_value)
         self._day_start_equity = eq
@@ -127,7 +127,7 @@ class RiskManager:
     # 止损 / 熔断
     # ------------------------------------------------------------
 
-    def current_drawdown(self, portfolio: "Portfolio") -> float:
+    def current_drawdown(self, portfolio: Portfolio) -> float:
         """相对历史峰值的回撤（负数）；峰值未知时返回 0。"""
         eq = float(portfolio.total_value)
         peak = self._peak_equity if self._peak_equity is not None else eq
@@ -135,13 +135,13 @@ class RiskManager:
         self._peak_equity = peak
         return (eq - peak) / peak if peak > 0 else 0.0
 
-    def daily_loss(self, portfolio: "Portfolio") -> float:
+    def daily_loss(self, portfolio: Portfolio) -> float:
         """当日相对开盘起点的盈亏（负数为亏）；起点未知时返回 0。"""
         if self._day_start_equity is None or self._day_start_equity <= 0:
             return 0.0
         return (float(portfolio.total_value) - self._day_start_equity) / self._day_start_equity
 
-    def check_drawdown_stop(self, portfolio: "Portfolio") -> bool:
+    def check_drawdown_stop(self, portfolio: Portfolio) -> bool:
         """累计回撤是否达到熔断线。触发则置位 ``_halted`` 并写 CRITICAL 日志。"""
         dd = self.current_drawdown(portfolio)
         if dd <= -self.total_drawdown_stop + _EPS:
@@ -154,7 +154,7 @@ class RiskManager:
             return True
         return False
 
-    def daily_stop_triggered(self, portfolio: "Portfolio") -> bool:
+    def daily_stop_triggered(self, portfolio: Portfolio) -> bool:
         """当日浮亏是否达到单日止损线（暂停新开仓）。"""
         loss = self.daily_loss(portfolio)
         triggered = loss <= -self.daily_stop_loss + _EPS
@@ -166,7 +166,7 @@ class RiskManager:
     # 订单准入
     # ------------------------------------------------------------
 
-    def check_order(self, order: "Order", portfolio: "Portfolio") -> bool:
+    def check_order(self, order: Order, portfolio: Portfolio) -> bool:
         """订单是否放行。
 
         - 累计回撤熔断 → 一律拒绝（含卖出，全面停盘）；
@@ -187,11 +187,11 @@ class RiskManager:
 
     def clip_position_size(
         self,
-        order: "Order",
-        portfolio: "Portfolio",
-        price: Optional[float] = None,
-        industry_map: Optional[Dict[str, str]] = None,
-    ) -> "Order":
+        order: Order,
+        portfolio: Portfolio,
+        price: float | None = None,
+        industry_map: dict[str, str] | None = None,
+    ) -> Order:
         """将买入订单裁减到单票/单行业仓位上限内（整手向下取整）。卖出原样返回。
 
         Args:

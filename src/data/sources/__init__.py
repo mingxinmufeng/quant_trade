@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Optional
 
 from .akshare_source import AkshareSource
+from .baostock_source import BaostockSource
 from .base import (
     DataFetchError,
     DataSourceBase,
@@ -21,7 +22,6 @@ from .base import (
     _is_proxy_error,
     _raise_if_proxy_error,
 )
-from .baostock_source import BaostockSource
 from .pytdx_source import (
     PytdxLocalSource,
     _auto_discover_tdx_path,
@@ -34,7 +34,7 @@ DEFAULT_SOURCES = ("pytdx", "akshare", "baostock", "tushare")
 
 
 def build_source(
-    name: str, *, tdx_path: Optional[str] = None, jitter: float = 0.0
+    name: str, *, tdx_path: str | None = None, jitter: float = 0.0
 ) -> DataSourceBase:
     name = name.lower().strip()
     if name == "akshare":
@@ -54,13 +54,13 @@ __all__ = [
     "BaostockSource",
     "DataFetchError",
     "DataSourceBase",
-    "PytdxLocalSource",
     "ProxyConfigError",
+    "PytdxLocalSource",
     "TushareSource",
-    "build_source",
     "_ak_call",
     "_auto_discover_tdx_path",
     "_build_daily_reader",
     "_is_proxy_error",
     "_raise_if_proxy_error",
+    "build_source",
 ]

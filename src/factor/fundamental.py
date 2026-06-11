@@ -28,7 +28,8 @@
 
 from __future__ import annotations
 
-from typing import Dict, Sequence, Type
+from collections.abc import Sequence
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
@@ -38,25 +39,25 @@ from .base import FactorBase
 
 __all__ = [
     "STANDARD_FIELDS",
-    "FundamentalFactor",
-    "RatioFactor",
-    "EarningsYieldFactor",
     "BookToMarketFactor",
-    "SalesYieldFactor",
-    "DividendYieldFactor",
-    "ROEFactor",
-    "ROAFactor",
-    "GrossMarginFactor",
-    "NetMarginFactor",
-    "RevenueGrowthFactor",
-    "ProfitGrowthFactor",
     "DebtToAssetFactor",
-    "LogMarketCapFactor",
+    "DividendYieldFactor",
+    "EarningsYieldFactor",
+    "FundamentalFactor",
     "FundamentalFactors",
+    "GrossMarginFactor",
+    "LogMarketCapFactor",
+    "NetMarginFactor",
+    "ProfitGrowthFactor",
+    "ROAFactor",
+    "ROEFactor",
+    "RatioFactor",
+    "RevenueGrowthFactor",
+    "SalesYieldFactor",
 ]
 
 #: 标准财务字段（横截面 DataFrame 的列名约定；数据层取数后归一到这些名字）
-STANDARD_FIELDS: Dict[str, str] = {
+STANDARD_FIELDS: dict[str, str] = {
     # 估值（原始比率，越小越便宜）
     "pe": "市盈率（TTM）",
     "pb": "市净率（MRQ）",
@@ -337,7 +338,7 @@ class FundamentalFactors:
         FundamentalFactors.register("my_alpha", MyAlphaFactor)  # 注册私有因子
     """
 
-    REGISTRY: Dict[str, Type[FundamentalFactor]] = {
+    REGISTRY: ClassVar[dict[str, type[FundamentalFactor]]] = {
         "earnings_yield": EarningsYieldFactor,
         "book_to_market": BookToMarketFactor,
         "sales_yield": SalesYieldFactor,
@@ -361,7 +362,7 @@ class FundamentalFactors:
         return cls.REGISTRY[key](**params)
 
     @classmethod
-    def register(cls, name: str, factor_cls: Type[FundamentalFactor]) -> None:
+    def register(cls, name: str, factor_cls: type[FundamentalFactor]) -> None:
         """注册自定义/私有财务因子类（必须继承 FundamentalFactor）。"""
         if not (isinstance(factor_cls, type) and issubclass(factor_cls, FundamentalFactor)):
             raise TypeError(f"{factor_cls!r} 必须是 FundamentalFactor 的子类")

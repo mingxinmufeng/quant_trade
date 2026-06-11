@@ -29,7 +29,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Type
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
@@ -38,15 +38,15 @@ from loguru import logger
 from .base import FactorBase
 
 __all__ = [
-    "TechnicalFactor",
-    "SMAFactor",
-    "EMAFactor",
-    "RSIFactor",
-    "MACDFactor",
-    "BollingerBandsFactor",
     "ATRFactor",
-    "VolumeMAFactor",
+    "BollingerBandsFactor",
+    "EMAFactor",
+    "MACDFactor",
+    "RSIFactor",
+    "SMAFactor",
+    "TechnicalFactor",
     "TechnicalFactors",
+    "VolumeMAFactor",
 ]
 
 # ------------------------------------------------------------
@@ -64,7 +64,7 @@ except ImportError:  # pragma: no cover - 视环境而定
         ) from exc
 
 
-def _pick_prefix(df: pd.DataFrame, prefix: str) -> Optional[pd.Series]:
+def _pick_prefix(df: pd.DataFrame, prefix: str) -> pd.Series | None:
     """从多输出 DataFrame 中按列名前缀取第一列（精确前缀匹配）。"""
     for col in df.columns:
         if str(col).upper().startswith(prefix.upper()):
@@ -94,7 +94,7 @@ class TechnicalFactor(FactorBase):
         ser.name = self.factor_name
         return self._with_date_index(ser, data)
 
-    def _calc(self, data: pd.DataFrame):  # noqa: ANN001
+    def _calc(self, data: pd.DataFrame):
         """子类实现：返回指标值（Series / ndarray / None）。"""
         raise NotImplementedError
 
@@ -208,7 +208,7 @@ class MACDFactor(TechnicalFactor):
     """
 
     required_columns = ("close",)
-    _PREFIX = {"macd": "MACD_", "signal": "MACDs_", "hist": "MACDh_"}
+    _PREFIX: ClassVar[dict[str, str]] = {"macd": "MACD_", "signal": "MACDs_", "hist": "MACDh_"}
 
     def __init__(self, fast: int = 12, slow: int = 26, signal: int = 9, output: str = "hist") -> None:
         output = str(output).lower()
@@ -237,7 +237,7 @@ class BollingerBandsFactor(TechnicalFactor):
     """
 
     required_columns = ("close",)
-    _PREFIX = {
+    _PREFIX: ClassVar[dict[str, str]] = {
         "lower": "BBL_",
         "middle": "BBM_",
         "upper": "BBU_",
@@ -284,7 +284,7 @@ class TechnicalFactors:
     """
 
     #: 因子名 → 类（名称与 config/CLI 字符串对齐，全小写）
-    REGISTRY: Dict[str, Type[TechnicalFactor]] = {
+    REGISTRY: ClassVar[dict[str, type[TechnicalFactor]]] = {
         "sma": SMAFactor,
         "ema": EMAFactor,
         "rsi": RSIFactor,

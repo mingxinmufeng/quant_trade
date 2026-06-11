@@ -32,9 +32,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -60,7 +60,7 @@ def _time_col(freq: str) -> str:
     return "date" if freq == "daily" else "datetime"
 
 
-def _schema(freq: str) -> Dict[str, str]:
+def _schema(freq: str) -> dict[str, str]:
     """返回对应周期的落盘字段 schema。"""
     return DAILY_COLUMNS if freq == "daily" else MINUTE_COLUMNS
 
@@ -78,8 +78,8 @@ class DataProcessor:
 
     def __init__(
         self,
-        calendar: Optional[TradingCalendar] = None,
-        store_path: Union[str, Path] = "data_store",
+        calendar: TradingCalendar | None = None,
+        store_path: str | Path = "data_store",
         mask_suspended: bool = True,
         drop_zero_price: bool = True,
     ) -> None:
@@ -198,9 +198,9 @@ class DataProcessor:
     def align_to_calendar(
         self,
         df: pd.DataFrame,
-        start: Optional[Union[str, date, datetime]] = None,
-        end: Optional[Union[str, date, datetime]] = None,
-        code: Optional[str] = None,
+        start: str | date | datetime | None = None,
+        end: str | date | datetime | None = None,
+        code: str | None = None,
     ) -> pd.DataFrame:
         """把日线 reindex 到 ``[start, end]`` 的完整交易日序列。
 
@@ -266,12 +266,12 @@ class DataProcessor:
 
     def align_panel(
         self,
-        data: Dict[str, pd.DataFrame],
+        data: dict[str, pd.DataFrame],
         fields: Sequence[str] = ("close",),
-        start: Optional[Union[str, date, datetime]] = None,
-        end: Optional[Union[str, date, datetime]] = None,
+        start: str | date | datetime | None = None,
+        end: str | date | datetime | None = None,
         use_calendar: bool = True,
-    ) -> Dict[str, pd.DataFrame]:
+    ) -> dict[str, pd.DataFrame]:
         """把 ``{code: 日线df}`` 透视为 ``{field: DataFrame(index=date, columns=code)}``。
 
         统一日期索引：``use_calendar=True`` 时取 ``[start,end]`` 的交易日（缺省由数据
@@ -311,7 +311,7 @@ class DataProcessor:
             if end is not None:
                 idx = idx[idx <= pd.Timestamp(parse_date(end))]
 
-        result: Dict[str, pd.DataFrame] = {}
+        result: dict[str, pd.DataFrame] = {}
         for field in fields:
             cols = {}
             for code, df in frames.items():
@@ -336,7 +336,7 @@ class DataProcessor:
         mode: str = "hfq",
         *,
         freq: str = "daily",
-        anchor_date: Optional[Union[str, date, datetime]] = None,
+        anchor_date: str | date | datetime | None = None,
     ) -> pd.DataFrame:
         """按因子表复权（委托 ``src.data.adjust.apply_adjust``）。
 
@@ -369,9 +369,9 @@ class DataProcessor:
         freq: str = "daily",
         *,
         align: bool = False,
-        start: Optional[Union[str, date, datetime]] = None,
-        end: Optional[Union[str, date, datetime]] = None,
-        code: Optional[str] = None,
+        start: str | date | datetime | None = None,
+        end: str | date | datetime | None = None,
+        code: str | None = None,
     ) -> pd.DataFrame:
         """标准流水线：``clean`` →（可选 ``align_to_calendar``）。
 
