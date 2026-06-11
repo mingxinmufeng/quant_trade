@@ -109,7 +109,7 @@ all = [
 # 命令行入口
 # ------------------------------------------------------------
 [project.scripts]
-quant = "main:app"
+quant = "a_share_quant_pro.main:app"
 
 # ------------------------------------------------------------
 # 项目链接（可选）
@@ -146,12 +146,24 @@ packages = [
     "a_share_quant_pro",
     "a_share_quant_pro.utils",
     "a_share_quant_pro.data",
+    "a_share_quant_pro.data.sources",
+    "a_share_quant_pro.factor",
+    "a_share_quant_pro.strategy",
+    "a_share_quant_pro.strategy.examples",
+    "a_share_quant_pro.engine",
+    "a_share_quant_pro.risk",
 ]
 
 [tool.setuptools.package-dir]
 "a_share_quant_pro" = "src"
 "a_share_quant_pro.utils" = "src/utils"
 "a_share_quant_pro.data" = "src/data"
+"a_share_quant_pro.data.sources" = "src/data/sources"
+"a_share_quant_pro.factor" = "src/factor"
+"a_share_quant_pro.strategy" = "src/strategy"
+"a_share_quant_pro.strategy.examples" = "src/strategy/examples"
+"a_share_quant_pro.engine" = "src/engine"
+"a_share_quant_pro.risk" = "src/risk"
 
 [tool.setuptools.package-data]
 "a_share_quant_pro" = ["*.yaml", "*.yml", "*.json"]
@@ -222,8 +234,11 @@ select = [
     "RUF",  # ruff-specific
 ]
 ignore = [
-    "E501",  # 行长由 formatter 处理
-    "B008",  # typer 大量使用函数调用作默认值
+    "E501",     # 行长由 formatter 处理
+    "B008",     # typer 大量使用函数调用作默认值
+    "RUF001",   # 中文字符串含「歧义」全角标点 —— 本项目为中文代码库，属预期
+    "RUF002",   # 中文 docstring 含全角标点 —— 同上
+    "RUF003",   # 中文注释含全角标点 —— 同上
 ]
 
 [tool.ruff.lint.per-file-ignores]

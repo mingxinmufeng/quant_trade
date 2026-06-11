@@ -300,21 +300,71 @@ class MyStrategy(BaseStrategy):
 
 ```
 .
-├── README.md                 # 项目说明
-├── requirements.txt          # 依赖清单
-├── config.yaml              # 配置文件
-├── .env.example             # 环境变量模板
-├── .gitignore               # Git忽略规则
-├── src/                     # 源代码
-│   ├── data/               # 数据层
-│   ├── factor/             # 因子层
-│   ├── strategy/           # 策略层
-│   ├── engine/             # 回测引擎层
-│   ├── risk/               # 风控层
-│   ├── utils/              # 工具函数
-│   └── main.py             # CLI入口
-├── tests/                   # 测试代码
-└── data_store/              # 本地数据仓库（Git忽略）
+├── README.md                       # 项目说明
+├── pyproject.toml                  # 包配置 / 构建 / 工具链（ruff/black/mypy/pytest/coverage）
+├── requirements.txt                # 依赖清单
+├── config.yaml                     # 配置文件
+├── .env.example                    # 环境变量模板
+├── .gitignore                      # Git 忽略规则
+├── Dockerfile                      # 容器化部署
+│
+├── src/                            # 源代码（import 名 a_share_quant_pro，见 pyproject 映射）
+│   ├── main.py                     # CLI 入口（typer，console_scripts: quant）
+│   │
+│   ├── data/                       # 数据层
+│   │   ├── trading_calendar.py     # 交易日历（akshare + 本地缓存，可离线）
+│   │   ├── universe.py             # 动态股票池（防幸存者偏差）
+│   │   ├── fetcher.py              # 多源拉取 + 增量更新编排（核心）
+│   │   ├── processor.py            # 清洗 / 对齐 / 复权编排
+│   │   ├── adjust.py               # 按需复权（前/后/不复权换算）
+│   │   ├── factors.py              # 复权因子提供器（新浪/tushare/东财容灾）
+│   │   ├── gbbq.py                 # 通达信本地权息读取 + 公司行为事件解析
+│   │   ├── resample.py             # 周期重采样（日→周/月；5min→15/30/60min）
+│   │   ├── suspend.py              # 停牌名单 Provider（整市场交易日快照）
+│   │   ├── storage.py              # 本地 Parquet 数据仓库读写
+│   │   └── sources/                # 数据源适配器（统一返回不复权 OHLCV）
+│   │       ├── base.py             #   DataSourceBase 抽象基类
+│   │       ├── pytdx_source.py     #   通达信本地盘（首选，零风控）
+│   │       ├── akshare_source.py   #   akshare（东财/新浪/腾讯二次容灾）
+│   │       ├── baostock_source.py  #   baostock（备用）
+│   │       └── tushare_source.py   #   tushare（备用，需 token）
+│   │
+│   ├── factor/                     # 因子层
+│   │   ├── base.py                 # FactorBase 抽象基类
+│   │   ├── technical.py            # 技术指标因子（pandas-ta-classic）
+│   │   └── fundamental.py          # 通用财务因子框架
+│   │
+│   ├── strategy/                   # 策略层（基类+示例公开，私有策略外部加载）
+│   │   ├── base.py                 # BaseStrategy 抽象基类 + Signal 枚举
+│   │   ├── loader.py               # 外部私有策略加载器
+│   │   └── examples/
+│   │       └── ma_rsi.py           # 双均线 + RSI 示例策略
+│   │
+│   ├── engine/                     # 回测引擎层
+│   │   ├── portfolio.py            # 持仓与资金管理
+│   │   ├── execution.py            # 撮合引擎（T+1/涨跌停/滑点/成交量/分红）
+│   │   └── backtester.py           # 回测主引擎 + 绩效评估
+│   │
+│   ├── risk/                       # 风控层
+│   │   └── risk_manager.py         # 仓位 / 止损 / 手续费 / 印花税
+│   │
+│   └── utils/                      # 公共工具
+│       ├── config_loader.py        # 配置加载（config.yaml + 外部覆盖）
+│       └── helpers.py              # 重试装饰器 / 日志初始化 / 工具函数
+│
+├── tests/                          # 测试套件（镜像 src + 数据完整性扫描）
+│   ├── conftest.py
+│   ├── data/                       # test_calendar / test_fetcher
+│   ├── engine/                     # test_execution / test_backtester
+│   ├── strategy/                   # test_loader
+│   ├── test_adjust.py              # 复权换算
+│   ├── test_gbbq_factor.py         # 通达信权息 / 复权因子
+│   ├── test_suspend.py             # 停牌名单
+│   └── test_data_integrity.py      # 本地 data_store 完整性扫描（脚本 + pytest 双用）
+│
+├── scripts/                        # 运维 / 数据工具脚本
+├── data_store/                     # 本地数据仓库（Git 忽略）
+└── logs/                           # 运行日志（Git 忽略）
 ```
 
 ## 许可证
