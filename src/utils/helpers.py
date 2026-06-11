@@ -31,6 +31,27 @@ from loguru import logger
 # 1. 日志系统初始化
 # ============================================================
 
+def _enable_utf8_console() -> None:
+    """Windows 控制台强制切到 UTF-8，消除中文日志乱码（非 Windows 直接返回）。
+
+    Windows 控制台默认代码页为 GBK(936)，而日志/源码为 UTF-8，字节按 GBK
+    解释即花屏。这里把控制台输入输出代码页切到 UTF-8(65001)，并把 Python 的
+    stdout/stderr 重新编码为 utf-8，双管齐下保证中文正常显示。所有操作均做
+    防御性兜底（stdout 被重定向、非真实控制台等场景下静默跳过）。
+    """
+    if sys.platform != "win32":
+        return
+    import contextlib
+    import ctypes
+
+    with contextlib.suppress(Exception):
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        ctypes.windll.kernel32.SetConsoleCP(65001)
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 def init_logging(
     log_dir: str = "logs",
     app_name: str = "quant_pro",
@@ -57,6 +78,9 @@ def init_logging(
         >>> init_logging(level="DEBUG")
         >>> logger.info("系统启动")
     """
+    # 先把 Windows 控制台切到 UTF-8，避免中文日志乱码（必须在添加 stdout sink 前）
+    _enable_utf8_console()
+
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
 
