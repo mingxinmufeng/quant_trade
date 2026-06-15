@@ -1,30 +1,29 @@
-"""Tushare pro 备用日线源，返回不复权 OHLCV（需 TUSHARE_TOKEN）。"""
+"""Tushare pro 备用日线源，返回不复权 OHLCV（多账号 token 池，限流自动轮换）。"""
 
 from __future__ import annotations
 
-import os
 from datetime import date
 
 import pandas as pd
 
 from ...utils.helpers import format_code
 from .base import DataSourceBase
+from .tushare_pool import TusharePool, get_tushare_tokens
 
 
 class TushareSource(DataSourceBase):
     name = "tushare"
 
     def __init__(self, token: str | None = None) -> None:
-        self._token = token or os.environ.get("TUSHARE_TOKEN", "").strip()
-        if not self._token:
+        tokens = [token.strip()] if token else get_tushare_tokens()
+        if not tokens or not tokens[0]:
             raise RuntimeError("tushare 数据源需要 TUSHARE_TOKEN 环境变量或显式 token")
-        import tushare as ts
-        ts.set_token(self._token)
-        self._pro = ts.pro_api()
+        self._pool = TusharePool(tokens)
 
     def fetch_daily(self, code: str, start: date, end: date) -> pd.DataFrame:
         ts_code = format_code(code)
-        df = self._pro.daily(
+        df = self._pool.call(
+            "daily",
             ts_code=ts_code,
             start_date=start.strftime("%Y%m%d"), end_date=end.strftime("%Y%m%d"),
         )

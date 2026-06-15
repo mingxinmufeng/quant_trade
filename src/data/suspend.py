@@ -27,7 +27,6 @@
 
 from __future__ import annotations
 
-import os
 import threading
 from collections.abc import Sequence
 from datetime import date, datetime
@@ -85,7 +84,7 @@ class SuspendProvider:
         self._enabled = bool(enabled)
         self._mem: dict[str, frozenset[str]] = {}
         self._lock = threading.Lock()
-        self._tushare_pro = None  # lazy
+        self._tushare_pool = None  # tushare 多账号 token 池（lazy）
         self._tushare_failed = False
 
     # ------------------------------------------------------------
@@ -202,10 +201,10 @@ class SuspendProvider:
 
     def _fetch_tushare(self, d: date, key: str) -> frozenset[str] | None:
         """tushare 全日停牌：``pro.suspend_d(suspend_type='S', trade_date='YYYYMMDD')``。"""
-        pro = self._get_tushare_pro()
-        if pro is None:
+        pool = self._get_tushare_pool()
+        if pool is None:
             return None
-        df = pro.suspend_d(suspend_type="S", trade_date=key)
+        df = pool.call("suspend_d", suspend_type="S", trade_date=key)
         if df is None:
             return None
         if df.empty:
@@ -214,22 +213,21 @@ class SuspendProvider:
         codes = {c for c in (_norm_code(v) for v in df[col].tolist()) if c}
         return frozenset(codes)
 
-    def _get_tushare_pro(self):
-        if self._tushare_pro is not None:
-            return self._tushare_pro
+    def _get_tushare_pool(self):
+        if self._tushare_pool is not None:
+            return self._tushare_pool
         if self._tushare_failed:
             return None
-        token = os.environ.get("TUSHARE_TOKEN", "").strip()
-        if not token:
-            logger.debug("未配置 TUSHARE_TOKEN，停牌 tushare 兜底不可用")
-            self._tushare_failed = True
-            return None
         try:
-            import tushare as ts
-            ts.set_token(token)
-            self._tushare_pro = ts.pro_api()
+            from .sources.tushare_pool import TusharePool
+            pool = TusharePool()
         except Exception as exc:
             logger.warning(f"初始化 tushare 失败，停牌兜底不可用: {exc}")
             self._tushare_failed = True
             return None
-        return self._tushare_pro
+        if not pool.available:
+            logger.debug("未配置 TUSHARE_TOKEN，停牌 tushare 兜底不可用")
+            self._tushare_failed = True
+            return None
+        self._tushare_pool = pool
+        return pool

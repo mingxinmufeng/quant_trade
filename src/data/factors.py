@@ -24,7 +24,6 @@
 
 from __future__ import annotations
 
-import os
 import random
 import threading
 import time
@@ -50,7 +49,7 @@ class FactorProvider:
     def __init__(self, source: str = "sina", jitter: float = 0.0) -> None:
         self._cache: dict[str, pd.DataFrame] = {}
         self._jitter = max(0.0, float(jitter))
-        self._pro = None  # tushare lazy
+        self._pool = None  # tushare 多账号 token 池（lazy）
         self._source = (source or "sina").strip().lower()
         # 多线程：每只股票一把锁，保证同一代码只拉取一次因子（避免并发重复请求）
         self._lock = threading.Lock()
@@ -125,16 +124,14 @@ class FactorProvider:
         return df[["date", "cum_factor"]].dropna()
 
     def _from_tushare(self, code: str) -> pd.DataFrame:
-        if self._pro is None:
+        if self._pool is None:
             with self._lock:
-                if self._pro is None:
-                    token = os.environ.get("TUSHARE_TOKEN", "").strip()
-                    if not token:
-                        return pd.DataFrame()
-                    import tushare as ts
-                    ts.set_token(token)
-                    self._pro = ts.pro_api()
-        df = self._pro.adj_factor(ts_code=code)
+                if self._pool is None:
+                    from .sources.tushare_pool import TusharePool
+                    self._pool = TusharePool()
+        if not self._pool.available:
+            return pd.DataFrame()
+        df = self._pool.call("adj_factor", ts_code=code)
         if df is None or df.empty:
             return pd.DataFrame()
         df["date"] = pd.to_datetime(df["trade_date"]).dt.normalize().astype("datetime64[ns]")
