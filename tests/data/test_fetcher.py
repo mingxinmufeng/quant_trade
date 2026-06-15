@@ -101,6 +101,142 @@ def test_backfill_limit_df():
     assert np.isclose(out.loc[2, "limit_up"], round(df.loc[1, "close"] * 1.1, 2))
 
 
+# ============================================================
+# 逐行点位 ST 涨跌停限幅（_limit_pct_series / _post_process / recompute_limits）
+# ============================================================
+
+
+def _offline_fetcher(tmp_path, code, current_name, profile_rows=None):
+    """构造离线 DataFetcher：禁停牌、注入合成 profile 更名表与当前名缓存（零网络）。"""
+    from src.data.fetcher import DataFetcher
+    from src.data.profile import ProfileStore
+
+    f = DataFetcher(
+        store_path=tmp_path, tdx_path="__nonexistent__", suspend_enabled=False,
+    )
+    DataFetcher._STOCK_NAME_CACHE[code] = current_name  # 预置避免触发网络名称表
+    if profile_rows is not None:
+        df = pd.DataFrame(profile_rows, columns=["code", "name", "change_date"])
+        df["change_date"] = pd.to_datetime(df["change_date"])
+        ps = ProfileStore(tdx_path="__nonexistent__")
+        ps._loaded = True
+        ps._df = df
+        f._profile = ps
+    return f
+
+
+def test_limit_pct_series_main_board_pointwise_st(tmp_path):
+    """主板逐行点位 ST：ST 时段 ±5%、转回常规名后 ±10%。"""
+    f = _offline_fetcher(
+        tmp_path, "600000.SH", "浦发银行",
+        profile_rows=[("600000.SH", "ST浦发", "2010-01-01")],
+    )
+    dates = pd.Series(pd.to_datetime(["2009-06-01", "2009-12-31", "2010-01-04", "2025-01-01"]))
+    pct = f._limit_pct_series("600000.SH", dates)
+    assert list(pct) == [0.05, 0.05, 0.10, 0.10]
+
+
+def test_limit_pct_series_non_main_board_ignores_st(tmp_path):
+    """创业板/科创板 ±20%、北交所 ±30%：即便点位名带 ST 也不受影响。"""
+    for code, current, expect in [
+        ("300001.SZ", "ST特锐", 0.20),
+        ("688001.SH", "ST华兴", 0.20),
+        ("830799.BJ", "ST艾融", 0.30),
+    ]:
+        f = _offline_fetcher(
+            tmp_path, code, current,
+            profile_rows=[(code, "ST曾用", "2010-01-01")],
+        )
+        dates = pd.Series(pd.to_datetime(["2009-06-01", "2025-01-01"]))
+        pct = f._limit_pct_series(code, dates)
+        assert list(pct) == [expect, expect], code
+
+
+def test_limit_pct_series_fallback_current_name(tmp_path):
+    """profile 不可用时主板回退当前名近似：当前名带 ST → 整段 ±5%。"""
+    f = _offline_fetcher(tmp_path, "600000.SH", "ST浦发", profile_rows=None)
+    assert not f._profile.available
+    dates = pd.Series(pd.to_datetime(["2009-06-01", "2025-01-01"]))
+    pct = f._limit_pct_series("600000.SH", dates)
+    assert list(pct) == [0.05, 0.05]
+
+
+def test_backfill_limit_df_with_pct_series(tmp_path):
+    """_backfill_limit_df 接受逐行 pct Series：仅回补 NaN，按行日期取对应限幅。"""
+    from src.data.fetcher import _backfill_limit_df
+
+    f = _offline_fetcher(
+        tmp_path, "600000.SH", "浦发银行",
+        profile_rows=[("600000.SH", "ST浦发", "2010-01-01")],
+    )
+    df = pd.DataFrame({
+        "date": pd.to_datetime(["2009-12-30", "2009-12-31", "2010-01-04"]),
+        "close": [10.0, 11.0, 12.0],
+        "limit_up": [np.nan, np.nan, np.nan],
+        "limit_down": [np.nan, np.nan, np.nan],
+    })
+    pct = f._limit_pct_series("600000.SH", df["date"])
+    out = _backfill_limit_df(df.copy(), pct)
+    assert pd.isna(out.loc[0, "limit_up"])              # 首行无前收
+    assert np.isclose(out.loc[1, "limit_up"], 10.5)     # ST 段 ±5%，前收 10
+    assert np.isclose(out.loc[2, "limit_up"], 12.1)     # 常规 ±10%，前收 11
+    assert np.isclose(out.loc[2, "limit_down"], 9.9)
+
+
+def test_recompute_limits_migrates_historical_st(tmp_path):
+    """recompute_limits 用逐行点位 ST 重算已落盘日线限幅，覆盖旧的当前名近似值。"""
+    f = _offline_fetcher(
+        tmp_path, "600000.SH", "浦发银行",
+        profile_rows=[("600000.SH", "ST浦发", "2010-01-01")],
+    )
+    dates = pd.to_datetime(["2009-12-30", "2009-12-31", "2010-01-04", "2010-01-05"])
+    close = pd.Series([10.0, 11.0, 12.0, 13.0])
+    raw = pd.DataFrame({
+        "date": dates, "code": "600000.SH",
+        "open": close, "high": close, "low": close, "close": close,
+        "volume": 1e5, "amount": 1e6, "is_suspended": False,
+        # 旧值：整段按当前名（非 ST）±10% 近似
+        "limit_up": (close.shift(1) * 1.1).round(2),
+        "limit_down": (close.shift(1) * 0.9).round(2),
+        "name": "浦发银行", "source": "test",
+    })
+    f._store.write_raw("600000.SH", "daily", raw)
+
+    n = f.recompute_limits(["600000.SH"])
+    assert n == 1
+    got = f._store.read_raw("600000.SH", "daily").sort_values("date").reset_index(drop=True)
+    assert pd.isna(got.loc[0, "limit_up"])              # 首行无前收，保持原值（NaN）
+    assert np.isclose(got.loc[1, "limit_up"], 10.5)     # 2009-12-31 ST → ±5%，前收 10
+    assert np.isclose(got.loc[1, "limit_down"], 9.5)
+    assert np.isclose(got.loc[2, "limit_up"], 12.1)     # 2010-01-04 常规 → ±10%，前收 11
+    assert np.isclose(got.loc[3, "limit_up"], 13.2)     # 前收 12
+
+
+def test_name_table_prefers_local_tushare(tmp_path):
+    """名称表优先读本地 tushare 基础信息缓存（离线，不联网东财）。"""
+    from src.data.fetcher import STOCK_BASIC_TUSHARE_FILE, DataFetcher
+
+    pd.DataFrame({
+        "ts_code": ["600000.SH", "000004.SZ", "830799.BJ"],
+        "name": ["浦发银行", "*ST国华", "艾融软件"],
+    }).to_parquet(tmp_path / STOCK_BASIC_TUSHARE_FILE, index=False)
+
+    f = DataFetcher(store_path=tmp_path, tdx_path="__nonexistent__", suspend_enabled=False)
+    DataFetcher._STOCK_NAME_CACHE.clear()  # 强制从本地源重建
+    assert f._load_names_from_local() is True
+    assert f._get_stock_name("600000.SH") == "浦发银行"
+    assert f._get_stock_name("000004.SZ") == "*ST国华"
+
+
+def test_name_table_local_missing_falls_back(tmp_path):
+    """本地基础信息缺失 → _load_names_from_local 返回 False（交由东财降级源）。"""
+    from src.data.fetcher import DataFetcher
+
+    f = DataFetcher(store_path=tmp_path, tdx_path="__nonexistent__", suspend_enabled=False)
+    DataFetcher._STOCK_NAME_CACHE.clear()
+    assert f._load_names_from_local() is False
+
+
 def test_minute_resample():
     from src.data import resample_minute
 
@@ -114,3 +250,45 @@ def test_minute_resample():
     out = resample_minute(mdf, base_period=1, target_period=5)
     assert len(out) == 4  # 20 根 1 分钟 → 4 根 5 分钟
     assert out["close"].iloc[0] == close.iloc[4]  # 每组取最后一根
+
+
+# ============================================================
+# load_daily(auto_fetch=)：基准指数缺则按需补拉（如 000300.SH）
+# ============================================================
+
+
+def test_load_daily_auto_fetch_triggers_update(tmp_path):
+    """本地无该代码 + auto_fetch=True → 调 update 落盘后再读到数据。"""
+    from src.data import DataStore
+    from src.data.fetcher import DataFetcher
+
+    f = DataFetcher(store_path=tmp_path, tdx_path="__nonexistent__", suspend_enabled=False)
+    called: dict = {}
+
+    def fake_update(codes, freqs=("daily",), **kw):
+        called["codes"] = list(codes)
+        DataStore(tmp_path).write_raw(codes[0], "daily", _raw_daily(code=codes[0]))
+
+    f.update = fake_update  # type: ignore[method-assign]
+    df = f.load_daily("000300.SH", "2024-01-01", "2024-02-01", adjust="none", auto_fetch=True)
+    assert called["codes"] == ["000300.SH"]      # 触发了补拉
+    assert len(df) > 0                            # 补拉后读到数据
+
+
+def test_load_daily_auto_fetch_skips_when_covered(tmp_path):
+    """本地已覆盖到 end → auto_fetch 不应再触发 update。"""
+    from src.data import DataStore
+    from src.data.fetcher import DataFetcher
+
+    DataStore(tmp_path).write_raw("000300.SH", "daily", _raw_daily(code="000300.SH", n=10))
+    f = DataFetcher(store_path=tmp_path, tdx_path="__nonexistent__", suspend_enabled=False)
+    called: dict = {}
+
+    def fake_update(codes, freqs=("daily",), **kw):
+        called["hit"] = True
+
+    f.update = fake_update  # type: ignore[method-assign]
+    # _raw_daily 起于 2024-01-02、10 个工作日，end 落在覆盖区间内
+    df = f.load_daily("000300.SH", "2024-01-02", "2024-01-10", adjust="none", auto_fetch=True)
+    assert "hit" not in called
+    assert len(df) > 0

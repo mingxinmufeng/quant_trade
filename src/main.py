@@ -79,6 +79,25 @@ def _parse_codes(codes: str | None) -> list[str]:
     return [format_code(raw) for raw in re.split(r"[\s,;]+", codes.strip()) if raw]
 
 
+def _benchmark_index_codes(cfg) -> list[str]:
+    """需随全市场一并采集的指数代码：``backtest.benchmark`` ∪ ``data.index_codes``（去重保序）。"""
+    from .utils.helpers import format_code
+
+    raw = list(cfg.get("data", {}).get("index_codes", []) or [])
+    bench = cfg.get("backtest", {}).get("benchmark")
+    if bench:
+        raw.append(bench)
+    out: list[str] = []
+    for c in raw:
+        try:
+            std = format_code(str(c))
+        except Exception:
+            continue
+        if std not in out:
+            out.append(std)
+    return out
+
+
 def _resolve_codes(cfg, codes: str | None, as_of: date, limit: int) -> list[str]:
     """优先用 --codes；否则用 Universe 在 as_of 时点取可交易股票（防幸存者偏差），截断 limit。"""
     parsed = _parse_codes(codes)
@@ -124,6 +143,11 @@ def fetch(
         if not code_list:
             raise typer.BadParameter("未能获取全市场代码清单（网络/接口异常），请检查网络或显式指定 --codes")
         logger.info(f"全市场代码数: {len(code_list)}（含北交所={not no_bse}）")
+        # 全市场更新时并入需采集的指数（基准 + data.index_codes），供回测离线用基准
+        idx = _benchmark_index_codes(cfg)
+        if idx:
+            code_list = list(dict.fromkeys([*code_list, *idx]))
+            logger.info(f"并入指数 {idx}")
 
     logger.info(f"开始更新 | 股票={len(code_list)} | 周期={freq_list}")
     fetcher.update(codes=code_list, freqs=freq_list, throttle=throttle)
@@ -170,14 +194,17 @@ def backtest(
     if not data:
         raise typer.Exit(code=1)
 
-    # 基准
+    # 基准：指数不在常规股票清单里，缺则按需 update 补全（pytdx 本地源近乎瞬时）
     benchmark = None
     bench_code = cfg.get("backtest", {}).get("benchmark")
     if bench_code:
         try:
-            bdf = fetcher.load_daily(bench_code, s, e, adjust="none")
-            benchmark = bdf.set_index("date")["close"]
-            logger.info(f"基准 {bench_code} 载入 {len(benchmark)} 日")
+            bdf = fetcher.load_daily(bench_code, s, e, adjust="none", auto_fetch=True)
+            if len(bdf):
+                benchmark = bdf.set_index("date")["close"]
+                logger.info(f"基准 {bench_code} 载入 {len(benchmark)} 日")
+            else:
+                logger.warning(f"基准 {bench_code} 区间内无数据，跳过基准对比")
         except Exception as exc:
             logger.warning(f"基准 {bench_code} 载入失败（{exc}），跳过基准对比")
 

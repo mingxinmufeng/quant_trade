@@ -11,7 +11,7 @@
 落盘缓存 ``{store}/stock_basic.parquet``，字段::
 
     code         str            标准代码 XXXXXX.SH/SZ/BJ
-    name         str            证券简称（含 ST/*ST 标识，**当前名**，见下方说明）
+    name         str            证券简称（含 ST/*ST 标识，**当前名**；历史时点名见下方）
     list_date    datetime64[ns] 上市日期
     delist_date  datetime64[ns] 退市/终止上市日期（在市为 NaT）
     exchange     str            SH / SZ / BJ
@@ -23,12 +23,14 @@
 - 退市：``stock_info_sh_delist`` / ``stock_info_sz_delist``
 - 列名随 akshare 版本波动，本模块用**关键字模糊匹配**列，尽量兼容多版本。
 
-关于"点位名称"的诚实说明
-------------------------
-免费数据源（akshare/csindex）只能拿到**当前证券简称**，无法回溯"某历史日该股是否
-带 ST"。因此 ``exclude_st`` 的过滤用的是**当前名**近似——这是无付费时点数据库下的
-工程折中，已在文档与日志中标注；``list_date`` / ``delist_date`` 则是真实点位数据，
-``get_tradable_stocks`` 的上市/退市过滤**严格防幸存者偏差**。
+点位 ST 判定（防幸存者偏差的名称口径）
+--------------------------------------
+akshare/csindex 只能拿到**当前证券简称**，无法回溯"某历史日该股是否带 ST"。本模块用
+**通达信本地更名史** ``profile.dat``（见 :class:`~src.data.profile.ProfileStore`）补齐这一
+点位维度：``get_tradable_stocks`` 的 ``exclude_st`` 过滤优先按 ``as_of_date`` 的**点位曾
+用名**判定 ST，仅当 profile.dat 不可用（未装通达信/无文件）时才回退到**当前名近似**。
+配合本就严格点位化的 ``list_date`` / ``delist_date`` 上市/退市过滤，整条股票池口径
+**统一防幸存者偏差**（不再用今天的 ST 状态倒推历史）。
 
 指数成分股（防幸存者偏差的指数口径）
 ------------------------------------
@@ -55,12 +57,16 @@ import pandas as pd
 from loguru import logger
 
 from ..utils.helpers import ensure_dir, format_code, parse_date, retry
+from .profile import ProfileStore
 from .sources.base import _ak_call
 
 __all__ = ["Universe"]
 
 #: 基础信息缓存文件名（相对 store_path）
 BASIC_INFO_FILE = "stock_basic.parquet"
+
+#: 更名史快照文件名（相对 store_path；ProfileStore 落盘，供点位 ST 判定）
+PROFILE_SNAPSHOT_FILE = "profile_names.parquet"
 
 #: 指数成分股快照目录名（相对 store_path）
 INDEX_WEIGHTS_DIR = "index_weights"
@@ -116,7 +122,7 @@ def _classify_market(code: str) -> str:
 
 
 def is_st_name(name: str | None) -> bool:
-    """证券简称是否含 ST / *ST / 退（当前名近似判定）。"""
+    """证券简称是否含 ST / *ST / 退（点位/当前名通用：仅判断给定的这个名字）。"""
     if not name:
         return False
     s = str(name).upper().replace(" ", "")
@@ -134,9 +140,12 @@ class Universe:
     Args:
         store_path: 数据仓库根目录；基础信息缓存写入 ``{store}/stock_basic.parquet``。
         min_list_days: 上市最少**自然日**数（避开新股波动期）。默认 60。
-        exclude_st: 是否剔除 ST/*ST/退（按当前名近似）。默认 True。
+        exclude_st: 是否剔除 ST/*ST/退。默认 True。剔除口径见 ``use_profile_st``。
         exclude_new_ipo: 是否启用 ``min_list_days`` 新股窗口过滤。False 时仅要求"已上市"。
             默认 True。
+        use_profile_st: ST 过滤是否按**点位曾用名**（通达信 profile.dat）判定。默认 True；
+            profile.dat 不可用时自动回退到**当前名近似**。
+        tdx_path: 通达信安装目录（供 ProfileStore 读 profile.dat）；留空则自动寻径。
         refresh_days: 基础信息缓存过期阈值（天）。默认 7。
         auto_load: 构造时立即加载/刷新基础信息表。设 False 可延迟（用于测试）。默认 True。
     """
@@ -147,6 +156,8 @@ class Universe:
         min_list_days: int = 60,
         exclude_st: bool = True,
         exclude_new_ipo: bool = True,
+        use_profile_st: bool = True,
+        tdx_path: str | None = None,
         refresh_days: int = 7,
         auto_load: bool = True,
     ) -> None:
@@ -154,10 +165,13 @@ class Universe:
         self._min_list_days = max(0, int(min_list_days))
         self._exclude_st = bool(exclude_st)
         self._exclude_new_ipo = bool(exclude_new_ipo)
+        self._use_profile_st = bool(use_profile_st)
+        self._tdx_path = (tdx_path or "").strip() or None
         self._refresh_days = int(refresh_days)
         self._cache_file = self._store_path / BASIC_INFO_FILE
         self._weights_dir = self._store_path / INDEX_WEIGHTS_DIR
         self._basic: pd.DataFrame = pd.DataFrame(columns=list(BASIC_COLUMNS.keys()))
+        self._profile: ProfileStore | None = None  # 点位曾用名（lazy）
         if auto_load:
             self.load()
 
@@ -175,6 +189,8 @@ class Universe:
             min_list_days=uni_cfg.get("min_list_days", 60),
             exclude_st=uni_cfg.get("exclude_st", True),
             exclude_new_ipo=uni_cfg.get("exclude_new_ipo", True),
+            use_profile_st=uni_cfg.get("use_profile_st", True),
+            tdx_path=data_cfg.get("tdx_path") or None,
             auto_load=auto_load,
         )
 
@@ -457,7 +473,8 @@ class Universe:
           1. 已上市且满足新股窗口：``list_date <= as_of_date - min_list_days``
              （``exclude_new_ipo=False`` 时窗口取 0，仅要求 ``list_date <= as_of_date``）；
           2. 未退市：``delist_date`` 为空 或 ``delist_date > as_of_date``；
-          3. ``exclude_st=True`` 时剔除当前名含 ST/*ST/退 的股票（当前名近似，见模块说明）。
+          3. ``exclude_st=True`` 时剔除 ``as_of_date`` 时点名含 ST/*ST/退 的股票
+             （点位曾用名优先，profile.dat 不可用时回退当前名，见模块说明）。
         """
         self._ensure_loaded()
         as_of = pd.Timestamp(parse_date(as_of_date)).normalize()
@@ -477,10 +494,9 @@ class Universe:
         not_delisted = delist_date.isna() | (delist_date > as_of)
 
         mask = listed_ok & not_delisted
-        # 3. ST 过滤
+        # 3. ST 过滤（点位曾用名优先，profile.dat 不可用则回退当前名）
         if self._exclude_st:
-            st_mask = df["name"].map(is_st_name).astype(bool)
-            mask = mask & (~st_mask)
+            mask = mask & (~self._st_mask_at(df, as_of))
 
         codes = df.loc[mask, "code"].dropna().astype(str).tolist()
         logger.debug(
@@ -488,6 +504,57 @@ class Universe:
             f"(min_list_days={window}, exclude_st={self._exclude_st})"
         )
         return sorted(set(codes))
+
+    # ------------------------------------------------------------
+    # 点位证券简称 / ST（曾用名 profile.dat + 当前名兜底）
+    # ------------------------------------------------------------
+
+    def _get_profile(self) -> ProfileStore | None:
+        """惰性构造 ProfileStore（点位曾用名源）；``use_profile_st=False`` 时返回 None。"""
+        if not self._use_profile_st:
+            return None
+        if self._profile is None:
+            self._profile = ProfileStore(
+                tdx_path=self._tdx_path,
+                snapshot_path=self._store_path / PROFILE_SNAPSHOT_FILE,
+            )
+        return self._profile
+
+    def _current_name(self, std_code: str) -> str:
+        """基础信息表里的当前证券简称；无记录返回空串。"""
+        self._ensure_loaded()
+        row = self._basic.loc[self._basic["code"] == std_code, "name"]
+        return str(row.iloc[0]) if not row.empty else ""
+
+    def name_at(self, code: str, as_of_date: str | date | datetime) -> str:
+        """返回某股在 ``as_of_date`` 的**点位证券简称**：曾用名(profile.dat)优先，否则当前名。"""
+        std = format_code(code)
+        prof = self._get_profile()
+        if prof is not None and prof.available:
+            former = prof.name_at(std, as_of_date)
+            if former is not None:
+                return former
+        return self._current_name(std)
+
+    def is_st_at(self, code: str, as_of_date: str | date | datetime) -> bool:
+        """某股在 ``as_of_date`` 是否为 ST/*ST/退（点位名判定）。"""
+        return is_st_name(self.name_at(code, as_of_date))
+
+    def _st_mask_at(self, df: pd.DataFrame, as_of: pd.Timestamp) -> pd.Series:
+        """``as_of`` 时点的 ST 布尔掩码（与 ``df`` 行对齐）。
+
+        以当前名为基线，用 profile.dat 的点位曾用名**覆盖**当日仍处于曾用名阶段的股票；
+        profile.dat 不可用时即纯当前名近似（向后兼容）。
+        """
+        prof = self._get_profile()
+        codes = df["code"].astype(str)
+        if prof is None or not prof.available:
+            return df["name"].map(is_st_name).astype(bool)
+        name_map = dict(zip(codes, df["name"].astype(str), strict=True))
+        for code, former in prof.names_at(as_of).items():
+            if code in name_map:
+                name_map[code] = former
+        return codes.map(lambda c: is_st_name(name_map.get(c))).astype(bool)
 
     # ------------------------------------------------------------
     # 公开接口 2：指数成分股（点位快照）

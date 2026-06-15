@@ -53,6 +53,7 @@ from ..utils.helpers import (
 )
 from .factors import FactorCalculator, FactorProvider
 from .gbbq import GbbqStore
+from .profile import ProfileStore
 from .resample import (  # 重导出，保持向后兼容
     resample_daily,
     resample_minute,
@@ -81,6 +82,7 @@ from .suspend import (
     SuspendProvider,
 )
 from .trading_calendar import TradingCalendar
+from .universe import is_st_name
 
 #: 默认重试参数
 DEFAULT_RETRY_TIMES = 3
@@ -91,6 +93,9 @@ DEFAULT_MAX_WORKERS = 16
 
 #: A 股最早可拉取日期
 EARLIEST_DATE = date(1990, 12, 19)
+
+#: 本地全市场基础信息缓存（tushare，含在市+退市当前简称）；股票名称表的稳定离线主源
+STOCK_BASIC_TUSHARE_FILE = "stock_basic_tushare.parquet"
 
 __all__ = [
     "DAILY_COLUMNS",
@@ -113,11 +118,17 @@ __all__ = [
 # ============================================================
 
 
-def _backfill_limit_df(df: pd.DataFrame, limit_pct: float) -> pd.DataFrame:
+def _backfill_limit_df(
+    df: pd.DataFrame, limit_pct: float | pd.Series,
+) -> pd.DataFrame:
     """回补 ``limit_up`` / ``limit_down`` 的 NaN（典型为增量批次首行缺前收）。
 
     原始价口径：用前一行（不复权）``close`` 作为参考收盘价反推。仅填 NaN 单元，
     不覆盖已有值；首行无前收则保持 NaN。
+
+    ``limit_pct`` 可为标量，或与 ``df`` **当前索引对齐**的逐行限幅比例 ``Series``
+    （主板历史 ST 时段 ±5% / 非 ST ±10% 的点位口径，见 ``_limit_pct_series``）。
+    传 Series 时按 ``df`` 索引重排，因此调用方无需保证行序与函数内部排序一致。
     """
     if df is None or df.empty:
         return df
@@ -126,11 +137,16 @@ def _backfill_limit_df(df: pd.DataFrame, limit_pct: float) -> pd.DataFrame:
     need = df["limit_up"].isna() | df["limit_down"].isna()
     if not need.any():
         return df
-    df = df.sort_values("date").reset_index(drop=True)
+    df = df.sort_values("date")
+    if isinstance(limit_pct, pd.Series):
+        pct = pd.to_numeric(limit_pct.reindex(df.index), errors="coerce").to_numpy()
+    else:
+        pct = np.full(len(df), float(limit_pct))
+    df = df.reset_index(drop=True)
     ref = pd.to_numeric(df["close"], errors="coerce")
     prev_ref = ref.shift(1)
-    lu = (prev_ref * (1.0 + limit_pct)).round(2)
-    ld = (prev_ref * (1.0 - limit_pct)).round(2)
+    lu = (prev_ref * (1.0 + pct)).round(2)
+    ld = (prev_ref * (1.0 - pct)).round(2)
     fill_up = df["limit_up"].isna() & lu.notna()
     fill_dn = df["limit_down"].isna() & ld.notna()
     df.loc[fill_up, "limit_up"] = lu[fill_up]
@@ -184,6 +200,11 @@ class DataFetcher:
         self._gbbq = GbbqStore(
             tdx_path=self._tdx_path,
             snapshot_path=self._store_path / "gbbq_events.parquet",
+        )
+        # 本地 profile（更名史）：点位证券简称 / ST 判定来源；更名快照落盘到 store 根下
+        self._profile = ProfileStore(
+            tdx_path=self._tdx_path,
+            snapshot_path=self._store_path / "profile_names.parquet",
         )
         self._factor_skip_via_gbbq = bool(factor_skip_via_gbbq)
         self._factor_source = (factor_source or "sina").strip().lower()
@@ -274,6 +295,12 @@ class DataFetcher:
                 logger.debug(f"gbbq 事件快照写盘跳过: {exc}")
             # 预热全市场除权除息日字典（一次 groupby，_should_skip_factor 走 O(1) 缓存）
             self._prewarm_gbbq_event_cache()
+        # profile 更名快照：解析一次并按版本戳落盘（供 Universe 点位 ST 判定免重复解析）
+        if self._profile.available:
+            try:
+                self._profile.save_snapshot()
+            except Exception as exc:
+                logger.debug(f"profile 更名快照写盘跳过: {exc}")
         # 预热停牌名单（lookback 窗口内交易日批量预取，消除多线程竞争）
         self._prewarm_suspend_cache()
 
@@ -439,6 +466,14 @@ class DataFetcher:
     # 公开接口：加载（按需复权）
     # ------------------------------------------------------------
 
+    @staticmethod
+    def _daily_needs_fetch(df: pd.DataFrame | None, end: pd.Timestamp) -> bool:
+        """auto_fetch 判定：本地无数据 / 为空 / 最新日未覆盖到 ``end`` 即需补拉。"""
+        if df is None or df.empty or "date" not in df.columns:
+            return True
+        last = pd.to_datetime(df["date"], errors="coerce").max()
+        return pd.isna(last) or last < end
+
     def load_daily(
         self,
         code: str,
@@ -448,18 +483,28 @@ class DataFetcher:
         adjust: str = "hfq",
         anchor_date: str | date | datetime | None = None,
         factor_source: str | None = None,
+        auto_fetch: bool = False,
     ) -> pd.DataFrame:
         """加载日线或日线以上周期（周/月/季/年由 daily resample 生成）。
 
         ``adjust`` ∈ {"none","hfq","qfq"}；``qfq`` 可传 ``anchor_date`` 锚定。
         ``factor_source`` ∈ {None,"active","gbbq"}：None=实例默认；"gbbq"=用 gbbq 自算因子复权。
+        ``auto_fetch=True``：本地缺该代码或未覆盖到 ``end`` 时，先 ``update`` 补全再读
+        （供回测基准指数等"按需落盘"场景，如 ``000300.SH``；pytdx 本地源近乎瞬时）。
         """
         code = format_code(code)
         use_gbbq = self._resolve_use_gbbq(factor_source)
+        s, e = pd.Timestamp(parse_date(start)), pd.Timestamp(parse_date(end))
         df = self._store.load(code, "daily", adjust, anchor_date=anchor_date, use_gbbq=use_gbbq)
+        if auto_fetch and self._daily_needs_fetch(df, e):
+            logger.info(f"[{code}] 本地日线缺失/未覆盖至 {e.date()}，自动 update 补全")
+            try:
+                self.update([code], freqs=("daily",))
+            except Exception as exc:
+                logger.warning(f"[{code}] auto_fetch update 失败: {exc}")
+            df = self._store.load(code, "daily", adjust, anchor_date=anchor_date, use_gbbq=use_gbbq)
         if df is None:
             raise FileNotFoundError(f"本地无 {code} 日线；请先 fetcher.update(['{code}'])")
-        s, e = pd.Timestamp(parse_date(start)), pd.Timestamp(parse_date(end))
         df = df[(df["date"] >= s) & (df["date"] <= e)].reset_index(drop=True)
         if period != "daily":
             df = resample_daily(df, period)
@@ -531,6 +576,40 @@ class DataFetcher:
         if not include_bse:
             codes = [c for c in codes if not c.endswith(".BJ")]
         return sorted(set(codes))
+
+    def recompute_limits(self, codes: Sequence[str] | None = None) -> int:
+        """用逐行点位 ST 重算已落盘日线的 ``limit_up`` / ``limit_down``（历史数据迁移）。
+
+        早期落盘的限幅按**当前名**整段近似，主板历史 ST 时段的 ±5% 未还原。本方法对已
+        存日线**逐行按行日期点位 ST** 重算并覆盖写回（原始 OHLCV 等其余字段不变；仅有
+        前收的行才覆盖，每段首行无前收保持原值）。``codes=None`` → 本地全部日线。
+
+        返回重写的股票数。``profile.dat`` 不可用时主板回退当前名近似（结果与旧值一致）。
+        """
+        if codes is None:
+            codes = sorted(p.stem for p in self._store._dirs["daily"].glob("*.parquet"))
+        codes = [format_code(c) for c in codes]
+        # 解析一次更名快照，供 _limit_pct_series 逐日点位 ST 判定
+        if self._profile.available:
+            try:
+                self._profile.save_snapshot()
+            except Exception as exc:
+                logger.debug(f"profile 更名快照写盘跳过: {exc}")
+        n = 0
+        for code in codes:
+            df = self._store.read_raw(code, "daily")
+            if df is None or df.empty:
+                continue
+            df = df.sort_values("date").reset_index(drop=True)
+            prev_ref = pd.to_numeric(df["close"], errors="coerce").shift(1)
+            pct = self._limit_pct_series(code, df["date"])
+            mask = prev_ref.notna()
+            df.loc[mask, "limit_up"] = (prev_ref * (1.0 + pct)).round(2)[mask]
+            df.loc[mask, "limit_down"] = (prev_ref * (1.0 - pct)).round(2)[mask]
+            self._store.write_raw(code, "daily", self._cast_types(df, DAILY_COLUMNS))
+            n += 1
+        logger.info(f"涨跌停限幅重算完成 | 重写 {n} 只股票日线")
+        return n
 
     # ------------------------------------------------------------
     # 内部：单股单周期增量更新（只采集不复权原始数据）
@@ -617,7 +696,9 @@ class DataFetcher:
         # 涨跌停首行回补：增量批次首行因缺前收导致 limit_up/down 为 NaN，
         # 拼接后用前一行（不复权）收盘价反推补齐。
         if freq == "daily":
-            combined = _backfill_limit_df(combined, self._limit_pct_for(code))
+            combined = _backfill_limit_df(
+                combined, self._limit_pct_series(code, combined["date"]),
+            )
 
         self._store.write_raw(code, freq, combined)
         logger.info(
@@ -625,13 +706,54 @@ class DataFetcher:
         )
 
     def _limit_pct_for(self, code: str) -> float:
-        """该股票的涨跌停比例（依赖 ST 状态 + 板块）。"""
+        """该股票的涨跌停比例（**当前名** ST 近似的标量兜底）。
+
+        仅在不需要逐行点位 ST 时使用；日线落盘的历史限幅一律走 ``_limit_pct_series``
+        逐行按行日期的点位 ST 判定（主板历史 ST 时段 ±5%）。
+        """
         try:
             name = self._get_stock_name(code)
         except Exception:
             name = ""
-        is_st = bool(name) and ("ST" in name.upper())
-        return get_limit_pct(code, is_st=is_st)
+        return get_limit_pct(code, is_st=is_st_name(name))
+
+    def _limit_pct_series(self, code: str, dates: pd.Series) -> pd.Series:
+        """逐行按行日期的点位 ST 计算涨跌停限幅比例（与 ``dates`` 同索引）。
+
+        - 主板（60x/00x）：用 ``ProfileStore.name_at`` 逐日判定点位 ST（曾用名优先、
+          当前名兜底），ST/*ST/退 → ±5%，否则 ±10%。ST 状态随时间变化，故必须逐行算。
+        - 创业板/科创板（±20%）、北交所（±30%）：限幅不受 ST 影响，整列返回板块常量。
+
+        ``profile.dat`` 不可用时主板回退到**当前名近似**（与 Universe 口径一致）。
+        """
+        pct_non_st = get_limit_pct(code, is_st=False)
+        pct_st = get_limit_pct(code, is_st=True)
+        # 非主板：ST 不影响限幅，整列常量（同时省去逐日 profile 查询）
+        if pct_non_st == pct_st:
+            return pd.Series(pct_non_st, index=dates.index, dtype="float64")
+        # 主板：逐（唯一）日点位 ST 判定
+        try:
+            current_name = self._get_stock_name(code)
+        except Exception:
+            current_name = ""
+        use_profile = self._profile is not None and self._profile.available
+        norm = pd.to_datetime(dates).dt.normalize()
+        st_cache: dict[pd.Timestamp, bool] = {}
+
+        def _is_st_at(ts: pd.Timestamp) -> bool:
+            if pd.isna(ts):  # reindex 出的占位行无日期：当前名兜底
+                return is_st_name(current_name)
+            cached = st_cache.get(ts)
+            if cached is None:
+                former = self._profile.name_at(code, ts) if use_profile else None
+                cached = is_st_name(former if former is not None else current_name)
+                st_cache[ts] = cached
+            return cached
+
+        is_st = norm.map(_is_st_at).to_numpy(dtype=bool)
+        return pd.Series(
+            np.where(is_st, pct_st, pct_non_st), index=dates.index, dtype="float64",
+        )
 
     # ------------------------------------------------------------
     # 内部：fallback 调度
@@ -737,14 +859,15 @@ class DataFetcher:
         # 权威停牌确认（按交易日整市场名单）：仅对缺口行判定，区分 :suspend / :gap
         confirmed = self._confirmed_suspended_mask(code, df["date"], missing)
 
-        # 涨跌停：用不复权前收反推（原始价口径）
+        # 涨跌停：用不复权前收反推（原始价口径）。限幅按**逐行点位 ST** 判定——
+        # 主板历史 ST 时段 ±5% / 非 ST ±10%（ST 状态随时间变化），创业板/科创板
+        # ±20%、北交所 ±30% 不受 ST 影响（见 _limit_pct_series）。
         prev_ref = df["close"].shift(1)
         try:
             stock_name = self._get_stock_name(code)
         except Exception:
             stock_name = ""
-        is_st = bool(stock_name) and ("ST" in stock_name.upper())
-        limit_pct = get_limit_pct(code, is_st=is_st)
+        limit_pct = self._limit_pct_series(code, df["date"])
         df["limit_up"] = (prev_ref * (1.0 + limit_pct)).round(2)
         df["limit_down"] = (prev_ref * (1.0 - limit_pct)).round(2)
 
@@ -861,24 +984,61 @@ class DataFetcher:
     # ------------------------------------------------------------
 
     def _ensure_stock_name_table(self) -> None:
+        """构建全市场「代码→当前简称」表（ST 判定用）。
+
+        **本地稳定源优先**：先读本地 tushare 基础信息缓存（``stock_basic_tushare.parquet``，
+        含在市+退市当前名，离线）；缺失/读取失败才**降级**到东财（akshare
+        ``stock_info_a_code_name``，实时联网，偶发连接重置不稳定）。
+        """
         if self._STOCK_NAME_CACHE:
             return
         with self._name_lock:
             if self._STOCK_NAME_CACHE:  # 等锁期间已被别的线程填充
                 return
-            try:
-                import akshare as ak
-                df = _ak_call(ak.stock_info_a_code_name)
-                if df is not None and not df.empty:
-                    # 向量化构建，比 iterrows() 快 10x+
-                    self._STOCK_NAME_CACHE.update({
-                        format_code(str(c)): str(n)
-                        for c, n in zip(df["code"].tolist(), df["name"].tolist(), strict=True)
-                    })
-            except ProxyConfigError:
-                raise
-            except Exception as exc:
-                logger.warning(f"加载股票名称表失败: {exc}")
+            if self._load_names_from_local():
+                return
+            self._load_names_from_akshare()
+
+    def _load_names_from_local(self) -> bool:
+        """从本地 tushare 基础信息缓存构建名称表（离线主源）。返回是否成功填充。"""
+        path = self._store_path / STOCK_BASIC_TUSHARE_FILE
+        if not path.exists():
+            logger.debug(f"本地基础信息缓存不存在（{path}），降级东财名称表")
+            return False
+        try:
+            df = pd.read_parquet(path, columns=["ts_code", "name"])
+        except Exception as exc:
+            logger.warning(f"读取本地基础信息 {path} 失败，降级东财: {exc}")
+            return False
+        if df is None or df.empty:
+            return False
+        self._STOCK_NAME_CACHE.update({
+            format_code(str(c)): str(n)
+            for c, n in zip(df["ts_code"].tolist(), df["name"].tolist(), strict=True)
+            if pd.notna(c) and pd.notna(n) and str(n).strip()
+        })
+        if not self._STOCK_NAME_CACHE:
+            return False
+        logger.debug(
+            f"股票名称表已从本地基础信息加载: {len(self._STOCK_NAME_CACHE)} 只 | {path}"
+        )
+        return True
+
+    def _load_names_from_akshare(self) -> None:
+        """降级源：东财全市场代码+当前名（实时联网，偶发不稳）。"""
+        try:
+            import akshare as ak
+            df = _ak_call(ak.stock_info_a_code_name)
+            if df is not None and not df.empty:
+                # 向量化构建，比 iterrows() 快 10x+
+                self._STOCK_NAME_CACHE.update({
+                    format_code(str(c)): str(n)
+                    for c, n in zip(df["code"].tolist(), df["name"].tolist(), strict=True)
+                })
+        except ProxyConfigError:
+            raise
+        except Exception as exc:
+            logger.warning(f"加载股票名称表失败（东财降级源）: {exc}")
 
     def _get_stock_name(self, code: str) -> str:
         std = format_code(code)
@@ -1056,6 +1216,10 @@ def _main() -> int:
         help="关闭 gbbq 增量触发器（强制每次刷新因子，即使无新权息事件）",
     )
     parser.add_argument(
+        "--recompute-limits", action="store_true",
+        help="用逐行点位 ST 重算已落盘日线的涨跌停限幅后退出（历史数据迁移，不拉新数据）",
+    )
+    parser.add_argument(
         "--log-level", default="INFO",
         choices=["TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR"],
         help="日志级别；DEBUG 可看到完整容灾链路",
@@ -1081,6 +1245,12 @@ def _main() -> int:
         factor_skip_via_gbbq=not args.no_factor_skip,
     )
     logger.info(f"实例化: {fetcher}")
+
+    if args.recompute_limits:
+        codes = [format_code(c) for c in args.codes] if args.codes else None
+        n = fetcher.recompute_limits(codes)
+        logger.success(f"涨跌停限幅重算完成（重写 {n} 只股票日线）")
+        return 0
 
     if args.codes:
         codes = [format_code(c) for c in args.codes]

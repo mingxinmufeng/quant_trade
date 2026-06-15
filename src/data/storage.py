@@ -12,6 +12,8 @@
     {store}/factors/{code}.parquet        # date → cum_factor（生效因子，覆盖刷新）
     {store}/factors_gbbq/{code}.parquet   # date → cum_factor（gbbq 自算并存记录，供交叉对比）
     {store}/gbbq_events.parquet           # 全市场权息事件快照（update 时按版本戳落盘）
+    {store}/profile_names.parquet         # 全市场更名史快照（点位 ST 判定，update 时落盘）
+    {store}/stock_basic.parquet           # 全市场基础信息（在市+退市，Universe 防幸存者偏差）
     {store}/adjusted/{freq}/{code}.parquet       # 后复权(hfq)缓存（生效因子，按版本戳重算）
     {store}/adjusted_gbbq/{freq}/{code}.parquet  # 后复权(hfq)缓存（gbbq 因子口径，隔离）
 

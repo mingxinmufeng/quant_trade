@@ -20,10 +20,22 @@ gbbq 二进制结构（``pytdx.reader.GbbqReader``，逐条 ``<B7sIBffff``）：
     f1=hongli_panqianliutong | f2=peigujia_qianzongguben |
     f3=songgu_qianzongguben | f4=peigu_houzongguben
 
-仅 ``category == 1``（除权除息）影响价格，此时四个浮点含义为（每 10 股口径）：
+四个浮点字段名沿用 ``category == 1``（除权除息）语义，**在不同 category 下含义不同**：
 
-    f1 = 每 10 股现金分红(元)   f2 = 配股价(元)
-    f3 = 每 10 股送转股         f4 = 每 10 股配股
+- ``category == 1``（除权除息，唯一影响复权价格），每 10 股口径：
+
+      f1 = 每 10 股现金分红(元)   f2 = 配股价(元)
+      f3 = 每 10 股送转股         f4 = 每 10 股配股
+
+- ``category == 5``（股本变化，本模块第二用途——**历史股本时间序列**），单位**万股**
+  （与通达信「权息股本」口径一致）：
+
+      f1 = 前流通股   f2 = 前总股本   f3 = 后流通股   f4 = 后总股本
+
+  即字段名 ``songgu_qianzongguben`` 实为**后流通股**、``peigu_houzongguben`` 实为
+  **后总股本**。category 5 逐期（季报 + 各类上市/回购事件）快照股本结构，由此可得
+  任意历史时点的真实股本，用于**点位市值 / 换手率**（防幸存者偏差，严禁用今值股本
+  倒推历史），见 :meth:`GbbqStore.shares`。
 """
 
 from __future__ import annotations
@@ -34,17 +46,23 @@ from pathlib import Path
 import pandas as pd
 from loguru import logger
 
-from ..utils.helpers import format_code
+from ..utils.helpers import format_code, parse_date
 from .sources import _auto_discover_tdx_path
 
 #: gbbq 类别：除权除息（唯一影响复权的类别）
 GBBQ_CATEGORY_EXDIV = 1
+
+#: gbbq 类别：股本变化（逐期后流通股/后总股本快照，不影响复权）
+GBBQ_CATEGORY_SHARECHANGE = 5
 
 #: 标准代码后缀 → gbbq market 编码
 _MARKET_BY_SUFFIX = {"SZ": 0, "SH": 1, "BJ": 2}
 
 #: 解析后的事件表 schema（每 10 股口径的原始字段，未除以 10）
 EVENT_COLUMNS = ("date", "fenhong", "peijia", "song", "pei")
+
+#: 历史股本序列 schema（单位：万股，与通达信「权息股本」口径一致）
+SHARES_COLUMNS = ("date", "float_shares", "total_shares")
 
 #: 事件快照落盘列（归一化后；足够 events() 查询使用）
 _SNAPSHOT_COLUMNS = [
@@ -282,6 +300,76 @@ class GbbqStore:
         if ev.empty:
             return None
         return pd.Timestamp(ev["date"].max())
+
+    # ------------------------------------------------------------
+    # 历史股本序列（category 5）
+    # ------------------------------------------------------------
+
+    def shares(self, code: str) -> pd.DataFrame:
+        """返回某股**历史股本时间序列** ``DataFrame[date, float_shares, total_shares]``。
+
+        数据来自 gbbq ``category == 5``（股本变化），每条给出该变更日的**后流通股 /
+        后总股本**（单位：万股，与通达信「权息股本」口径一致）；按 ``date`` 升序、去重、
+        仅保留总股本为正的快照。无记录返回空表。
+
+        注意 gbbq 字段名沿用除权除息语义，在 category 5 下 ``songgu_qianzongguben`` 实为
+        **后流通股**、``peigu_houzongguben`` 实为**后总股本**（详见模块 docstring）。
+
+        点位市值 / 换手率即由此计算（防幸存者偏差，严禁用今值股本倒推历史）::
+
+            总市值   = 不复权收盘价 × total_shares × 1e4
+            流通市值 = 不复权收盘价 × float_shares × 1e4
+            换手率   = 成交量(股) / (float_shares × 1e4)
+        """
+        self._load()
+        empty = pd.DataFrame(columns=list(SHARES_COLUMNS))
+        if self._df is None or self._df.empty:
+            return empty
+        std = format_code(code)
+        if "." not in std:
+            return empty
+        num, suffix = std.split(".")
+        market = _MARKET_BY_SUFFIX.get(suffix)
+        if market is None:
+            return empty
+        sub = self._df[
+            (self._df["market"] == market)
+            & (self._df["code"] == num)
+            & (self._df["category"] == GBBQ_CATEGORY_SHARECHANGE)
+        ]
+        if sub.empty:
+            return empty
+        out = sub.rename(
+            columns={
+                "songgu_qianzongguben": "float_shares",
+                "peigu_houzongguben": "total_shares",
+            }
+        )[list(SHARES_COLUMNS)].copy()
+        for c in ("float_shares", "total_shares"):
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+        out["date"] = pd.to_datetime(out["date"]).dt.normalize()
+        out = out.dropna(subset=["date"])
+        out = out[out["total_shares"] > 0]
+        return (
+            out.drop_duplicates(subset=["date"], keep="last")
+            .sort_values("date")
+            .reset_index(drop=True)
+        )
+
+    def shares_at(self, code: str, as_of) -> tuple[float, float] | None:
+        """``as_of`` 时点（含当日）最近一次股本快照 ``(float_shares, total_shares)``（万股）。
+
+        取 ``date <= as_of`` 的最后一条 category 5 记录；无则返回 None。
+        """
+        s = self.shares(code)
+        if s.empty:
+            return None
+        as_of_ts = pd.Timestamp(parse_date(as_of)).normalize()
+        elig = s[s["date"] <= as_of_ts]
+        if elig.empty:
+            return None
+        row = elig.iloc[-1]
+        return (float(row["float_shares"]), float(row["total_shares"]))
 
     def last_event_dates_all(self) -> dict[str, pd.Timestamp | None]:
         """返回全市场所有股票最近除权除息日字典 {std_code: pd.Timestamp}。

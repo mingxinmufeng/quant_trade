@@ -171,6 +171,57 @@ def test_store_bj_query_by_current_code():
 
 
 # ============================================================
+# 历史股本序列（category 5：后流通股 / 后总股本）
+# ============================================================
+
+
+def test_shares_from_category5_only():
+    """shares() 仅取 category==5，字段映射 后流通股/后总股本（单位万股）。"""
+    df = _gbbq_df([
+        (0, "000001", "2019-06-30", 5, 1717024.6, 1717041.1, 1717024.6, 1717041.1),
+        (0, "000001", "2019-09-18", 5, 1717024.6, 1717041.1, 1940575.3, 1940591.9),
+        (0, "000001", "2019-03-03", 1, 10.0, 0.0, 0.0, 0.0),  # 除权除息，不计入股本
+    ])
+    gs = _make_store_with_df(df)
+    s = gs.shares("000001.SZ")
+    assert list(s.columns) == ["date", "float_shares", "total_shares"]
+    assert len(s) == 2  # 仅两条 category 5
+    assert s["float_shares"].iloc[-1] == pytest.approx(1940575.3)
+    assert s["total_shares"].iloc[-1] == pytest.approx(1940591.9)
+
+
+def test_shares_drops_nonpositive_total():
+    """总股本非正的脏快照被剔除。"""
+    df = _gbbq_df([
+        (0, "000001", "2019-06-30", 5, 0.0, 0.0, 100.0, 0.0),   # 后总股本 0 → 丢弃
+        (0, "000001", "2019-09-18", 5, 0.0, 0.0, 200.0, 500.0),
+    ])
+    gs = _make_store_with_df(df)
+    s = gs.shares("000001.SZ")
+    assert len(s) == 1
+    assert s["total_shares"].iloc[0] == pytest.approx(500.0)
+
+
+def test_shares_at_picks_most_recent():
+    """shares_at 取 date<=as_of 的最近一条；早于首条返回 None。"""
+    df = _gbbq_df([
+        (0, "000001", "2019-06-30", 5, 0.0, 0.0, 1717024.6, 1717041.1),
+        (0, "000001", "2019-09-18", 5, 0.0, 0.0, 1940575.3, 1940591.9),
+    ])
+    gs = _make_store_with_df(df)
+    assert gs.shares_at("000001.SZ", "2019-07-01") == pytest.approx((1717024.6, 1717041.1))
+    assert gs.shares_at("000001.SZ", "2020-01-01") == pytest.approx((1940575.3, 1940591.9))
+    assert gs.shares_at("000001.SZ", "2019-01-01") is None  # 早于首条快照
+
+
+def test_shares_empty_without_category5():
+    df = _gbbq_df([(0, "000001", "2024-01-03", 1, 10.0, 0.0, 0.0, 0.0)])
+    gs = _make_store_with_df(df)
+    assert gs.shares("000001.SZ").empty
+    assert gs.shares_at("000001.SZ", "2024-06-01") is None
+
+
+# ============================================================
 # 事件快照落盘 / 回读
 # ============================================================
 

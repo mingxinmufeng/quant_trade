@@ -22,6 +22,7 @@ data:
   suspend_lookback_days: 30             # 仅对近 N 天内未缓存交易日联网拉取；更久远历史回退缺口启发式（避免首拉海量请求）
   suspend_enabled: true                 # 是否启用权威停牌名单；false 则纯靠缺口反推
   tdx_path: ""                          # 通达信安装目录（含 vipdoc）；留空则自动寻径，可在 config.private.yaml 里覆盖
+  index_codes: ["000300.SH", "000905.SH", "000016.SH"]  # 随全市场一并采集的指数（基准/对冲用）；pytdx 本地可读，回测离线取基准
   request_timeout: 15                   # 单次 HTTP 请求超时（秒）
   stock_timeout: 60                     # 单只股票整体超时（秒，含全部重试）
   retry_times: 3                        # 最大重试次数
@@ -36,6 +37,7 @@ universe:
   min_list_days: 60                     # 上市最少天数，剔除新股波动期
   exclude_st: true                      # 是否剔除 ST/*ST 股票
   exclude_new_ipo: true                 # 是否剔除上市 min_list_days 天内的新股（与 min_list_days 协同）
+  use_profile_st: true                  # ST 过滤按点位曾用名(通达信 profile.dat)判定；不可用时自动回退当前名近似
 
 # ------------------------------------------------------------
 # 策略加载（src/strategy/loader.py）
