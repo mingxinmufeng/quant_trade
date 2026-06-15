@@ -284,6 +284,11 @@ class Universe:
                     delist_frames.append(part)
             except Exception as exc:
                 logger.warning(f"退市清单 {fetch.__name__} 拉取失败: {type(exc).__name__}: {exc}")
+        # 并入 tushare 退市清单（含北交所/老三板，补 akshare 退市接口未覆盖部分；与回填总清单口径一致）
+        ts_delist = self._load_tushare_delisted()
+        if not ts_delist.empty:
+            delist_frames.append(ts_delist)
+            logger.debug(f"并入 tushare 退市清单 {len(ts_delist)} 条")
 
         if not frames and not delist_frames:
             raise RuntimeError("在市与退市清单均拉取失败")
@@ -380,6 +385,45 @@ class Universe:
         out["exchange"] = out["code"].str.split(".").str[-1]
         out["market_type"] = out["code"].map(_classify_market)
         return out
+
+    def _load_tushare_delisted(self) -> pd.DataFrame:
+        """并入 tushare ``stock_basic`` 的退市清单（含北交所/老三板，补 akshare 退市接口未覆盖部分）。
+
+        读本地 ``{store}/stock_basic_tushare.parquet`` 的 ``list_status='D'`` 行，规整到
+        ``BASIC_COLUMNS`` 口径；文件不存在 / 无合法记录时返回空表（仅作退市补充，不替代
+        akshare 在市来源）。脏码（非 ``XXXXXX.SH/SZ/BJ``，如 ``T600018.SH``）一并剔除。
+        """
+        path = self._store_path / "stock_basic_tushare.parquet"
+        if not path.exists():
+            return pd.DataFrame()
+        try:
+            df = pd.read_parquet(path)
+        except Exception as exc:
+            logger.warning(f"读取 tushare 基础信息 {path} 失败: {exc}")
+            return pd.DataFrame()
+        if "list_status" not in df.columns or "ts_code" not in df.columns:
+            return pd.DataFrame()
+        d = df[df["list_status"].astype(str) == "D"].copy()
+        if d.empty:
+            return pd.DataFrame()
+        d = d[d["ts_code"].astype(str).str.match(r"^\d{6}\.(SH|SZ|BJ)$")]
+        if d.empty:
+            return pd.DataFrame()
+        out = pd.DataFrame()
+        out["code"] = d["ts_code"].astype(str)
+        out["name"] = d["name"].astype(str) if "name" in d.columns else ""
+        out["list_date"] = (
+            pd.to_datetime(d["list_date"].astype(str), format="%Y%m%d", errors="coerce")
+            if "list_date" in d.columns else pd.NaT
+        )
+        out["delist_date"] = (
+            pd.to_datetime(d["delist_date"].astype(str), format="%Y%m%d", errors="coerce")
+            if "delist_date" in d.columns else pd.NaT
+        )
+        out["industry"] = d["industry"].astype(str) if "industry" in d.columns else ""
+        out["exchange"] = out["code"].str.split(".").str[-1]
+        out["market_type"] = out["code"].map(_classify_market)
+        return out.reset_index(drop=True)
 
     @staticmethod
     def _safe_format_code(raw: str, default_suffix: str) -> str | None:
