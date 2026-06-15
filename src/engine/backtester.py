@@ -197,12 +197,18 @@ class Backtester:
         indexed = {code: df.set_index("date") for code, df in data.items()}
 
         pf = Portfolio(self.initial_capital, t1_cash_freeze=self.t1_cash_freeze)
+        # 风控初始化（仅在显式注入 risk_manager 时启用止损/熔断/仓位限制）
+        if self.risk_manager is not None and hasattr(self.risk_manager, "reset"):
+            self.risk_manager.reset(self.initial_capital)
         equity_dates: list[date] = []
         equity_values: list[float] = []
         positions_log: list[dict[str, int]] = []
 
         for i, day in enumerate(trading_days):
             pf.settle_new_day()  # 解冻 T+1
+            # 风控：记录当日起点权益并刷新历史峰值（单日止损 / 累计回撤熔断的基准）
+            if self.risk_manager is not None and hasattr(self.risk_manager, "on_new_day"):
+                self.risk_manager.on_new_day(pf)
 
             if self.apply_corporate_actions and i > 0:
                 self._handle_corporate_actions(pf, indexed, trading_days[i - 1], day)
@@ -284,6 +290,7 @@ class Backtester:
             row = signals.loc[signal_day]
         except KeyError:
             return
+        rm = self.risk_manager
         sells = [c for c in signals.columns if int(row.get(c, 0)) == int(Signal.SELL) and pf.has_position(c)]
         buys = [c for c in signals.columns if int(row.get(c, 0)) == int(Signal.BUY)]
 
@@ -294,6 +301,9 @@ class Backtester:
                 continue
             pos = pf.get_position(code)
             order = Order(code=code, direction=int(Signal.SELL), shares=pos.shares, trade_date=exec_day.date())
+            # 风控：累计回撤熔断时全面停盘（含卖出）；单日止损不拦截卖出
+            if rm is not None and not rm.check_order(order, pf):
+                continue
             self.execution.match(order, bar, pf)
 
         for code in buys:
@@ -310,6 +320,13 @@ class Backtester:
             if shares < 100:
                 continue
             order = Order(code=code, direction=int(Signal.BUY), shares=shares, trade_date=exec_day.date())
+            # 风控：熔断/单日止损拦截新开仓；并按单票(/行业)上限裁减股数
+            if rm is not None:
+                if not rm.check_order(order, pf):
+                    continue
+                rm.clip_position_size(order, pf, price=float(base))
+                if order.shares < 100:
+                    continue
             self.execution.match(order, bar, pf)
 
     @staticmethod

@@ -87,3 +87,30 @@ def test_no_future_function_first_day_flat(sample_data):
         MaRsiStrategy(fast_period=5, slow_period=20), "2024-01-01", "2024-12-31", data=sample_data
     )
     assert abs(res.equity_curve.iloc[0] * 1_000_000 - 1_000_000) < 1e-6
+
+
+def test_risk_manager_position_cap_wired(sample_data):
+    """注入 RiskManager 时，单票上限应裁减建仓市值（验证风控已接入回测主循环）。"""
+    from src.engine import Backtester
+    from src.risk import RiskManager
+    from src.strategy.examples.ma_rsi import MaRsiStrategy
+
+    cfg = {"backtest": {"initial_capital": 1_000_000}}
+    strat = lambda: MaRsiStrategy(fast_period=5, slow_period=20)  # noqa: E731
+    cap_value = 1_000_000 * 0.10 * 1.2  # 10% 上限 + 20% 容差（建仓时点 total 波动）
+
+    # 单票上限 10%，关闭止损/熔断以隔离仓位裁减
+    rm = RiskManager(max_single_position=0.10, daily_stop_loss=1.0, total_drawdown_stop=1.0)
+    res = Backtester(config=cfg, risk_manager=rm, position_size=0.5).run(
+        strat(), "2024-01-01", "2024-12-31", data=sample_data
+    )
+    assert res.trades, "应至少有若干笔交易用于验证"
+    for t in res.trades:
+        assert t.entry_price * t.shares <= cap_value, "风控未生效：建仓市值超出单票上限"
+
+    # 对照：不接风控时 position_size=0.5 会建出超过 10% 的仓位
+    res2 = Backtester(config=cfg, position_size=0.5).run(
+        strat(), "2024-01-01", "2024-12-31", data=sample_data
+    )
+    assert any(t.entry_price * t.shares > cap_value for t in res2.trades), \
+        "对照组应出现超过 10% 的建仓（否则测试无区分力）"
