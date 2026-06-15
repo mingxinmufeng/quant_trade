@@ -73,6 +73,11 @@ def main() -> int:
               + (f" | delist {df['delist_date'].min()}~{df['delist_date'].max()}" if st == "D" else ""))
 
     out = pd.concat(frames, ignore_index=True).drop_duplicates("ts_code", keep="last")
+    # 过滤脏码（tushare 偶发非标准 ts_code，如 T600018.SH）；统一为 XXXXXX.SH/SZ/BJ
+    bad = ~out["ts_code"].astype(str).str.match(r"^\d{6}\.(SH|SZ|BJ)$")
+    if bad.any():
+        print(f"过滤脏码 {int(bad.sum())} 条: {out.loc[bad, 'ts_code'].tolist()}")
+        out = out[~bad].reset_index(drop=True)
     OUT.parent.mkdir(parents=True, exist_ok=True)
     out.to_parquet(OUT, index=False)
     print(f"已保存 {OUT} | 合计 {len(out)} | 状态分布:")
