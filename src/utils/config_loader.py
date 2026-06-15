@@ -382,6 +382,13 @@ def load_config(
         if target_env.exists():
             load_dotenv(target_env, override=False)
             logger.debug(f".env 已加载: {target_env}")
+            # 凭证类变量（非 QUANT_ 前缀，如 TUSHARE_TOKEN*）：让 .env 取得权威，
+            # 避免被系统中陈旧的同名环境变量遮蔽（见 token-shadow 历史问题）。
+            # QUANT_ 前缀是配置覆盖通道，保留"系统环境 > .env"语义，不强制覆盖。
+            from dotenv import dotenv_values
+            for _k, _v in dotenv_values(target_env).items():
+                if _v is not None and not _k.startswith(ENV_PREFIX):
+                    os.environ[_k] = _v
 
     # 2. 起始配置 = 内置默认
     merged: dict[str, Any] = deepcopy(DEFAULT_CONFIG)

@@ -12,8 +12,10 @@ from __future__ import annotations
 import pandas as pd
 
 #: 支持 resample 落地的「日线以上」周期 → pandas 偏移别名
+#: 周线锚到周五（A 股周线惯例为当周最后交易日，W-FRI 比默认 W=W-SUN 更贴近，
+#: 避免 bar 日期落在周日这一非交易日）；月/季/年用期末（ME/QE/YE）。
 DAILY_RESAMPLE_RULES = {
-    "weekly": "W",
+    "weekly": "W-FRI",
     "monthly": "ME",
     "quarterly": "QE",
     "yearly": "YE",

@@ -1040,8 +1040,8 @@ def _main() -> int:
     parser.add_argument("--freqs", nargs="*", default=["daily", "min5", "min1"], help="更新周期子集")
     parser.add_argument("--throttle", type=float, default=0.3, help="每只股票间 sleep 秒数")
     parser.add_argument(
-        "--max-workers", type=int, default=DEFAULT_MAX_WORKERS,
-        help=f"并行线程数（按股票并行，默认 {DEFAULT_MAX_WORKERS}；1=串行）",
+        "--max-workers", type=int, default=None,
+        help=f"并行线程数（按股票并行，1=串行）；缺省读 config.data.max_workers，无配置则 {DEFAULT_MAX_WORKERS}",
     )
     parser.add_argument("--store-path", default="data_store", help="数据仓库根目录")
     parser.add_argument("--tdx-path", default=None, help="通达信目录（留空自动寻径）")
@@ -1066,8 +1066,17 @@ def _main() -> int:
         return _selftest(tdx_path=args.tdx_path, level=args.log_level)
 
     init_logging(level=args.log_level)
+    # 并发数单一事实来源：CLI 显式 > config.data.max_workers > 代码默认（与 src.main fetch 一致）
+    if args.max_workers is not None:
+        workers = args.max_workers
+    else:
+        try:
+            from ..utils.config_loader import load_config
+            workers = int(load_config().data.max_workers)
+        except Exception:
+            workers = DEFAULT_MAX_WORKERS
     fetcher = DataFetcher(
-        store_path=args.store_path, tdx_path=args.tdx_path, max_workers=args.max_workers,
+        store_path=args.store_path, tdx_path=args.tdx_path, max_workers=workers,
         factor_source=args.factor_source,
         factor_skip_via_gbbq=not args.no_factor_skip,
     )
@@ -1084,7 +1093,7 @@ def _main() -> int:
 
     fetcher.update(
         codes, freqs=tuple(args.freqs), throttle=args.throttle,
-        max_workers=args.max_workers,
+        max_workers=workers,
     )
     logger.success("数据拉取/更新完成")
     return 0

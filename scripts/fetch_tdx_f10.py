@@ -4,7 +4,6 @@
 import json
 import re
 from pathlib import Path
-from collections import OrderedDict
 
 from pytdx.hq import TdxHq_API
 
