@@ -43,6 +43,11 @@ __all__ = ["FactorBase"]
 #: 支持的标准化方法
 NORMALIZE_METHODS = ("zscore", "rank", "minmax", "robust")
 
+#: __init__ 中禁止被因子参数覆盖的保留名（方法 / 核心属性）
+_RESERVED_PARAM_NAMES = frozenset(
+    {"params", "factor_name", "compute", "compute_panel", "normalize", "shift", "validate_input"}
+)
+
 
 class FactorBase(ABC):
     """因子抽象基类。
@@ -61,8 +66,13 @@ class FactorBase(ABC):
 
     def __init__(self, **params) -> None:
         self.params: dict[str, object] = dict(params)
-        # 参数同时暴露为属性，便于子类内 self.period 直接取用
+        # 参数同时暴露为属性，便于子类内 self.period 直接取用。
+        # fail-fast：禁止参数名与基类方法/保留属性冲突，避免静默覆盖 compute 等核心成员。
         for key, value in self.params.items():
+            if key in _RESERVED_PARAM_NAMES or hasattr(FactorBase, key):
+                raise ValueError(
+                    f"因子参数名 {key!r} 与基类保留属性/方法冲突，请改用其它参数名"
+                )
             setattr(self, key, value)
         # 未显式设置 factor_name 的子类，回退到类名（小写）
         if type(self).factor_name == FactorBase.factor_name:
@@ -126,15 +136,35 @@ class FactorBase(ABC):
 
     @staticmethod
     def _as_dated_series(ser: pd.Series, source: pd.DataFrame) -> pd.Series:
-        """把 compute 结果对齐到以交易日为索引的 Series（容忍 RangeIndex + date 列）。"""
+        """把 compute 结果对齐到以交易日为索引的 Series。
+
+        对齐优先级：
+        1. ``ser`` 自带 ``DatetimeIndex`` → 直接采用（最安全，子类应优先返回此形态）；
+        2. ``ser`` 为 ``RangeIndex`` 且长度与 ``source`` 完全相等 → **按位置**贴上
+           ``source`` 的 ``date`` 列或 ``DatetimeIndex``。
+
+        ⚠️ 第 2 种是"按位置对齐"：仅当 ``compute`` 未改变行数/行序时才正确。若 ``compute``
+        内部做了重采样（如日→周）、``dropna`` 或过滤，导致长度不等，这里**不再静默退化**，
+        而是抛 ``ValueError``，要求该类因子自行返回带 ``DatetimeIndex`` 的结果，避免把
+        ``RangeIndex`` 当索引拼进面板造成无声的数据错位。
+        """
         if isinstance(ser.index, pd.DatetimeIndex):
             return ser
-        if "date" in source.columns and len(source) == len(ser):
+        # 非日期索引：只接受"行数未变"的按位置对齐，否则要求子类自带 DatetimeIndex。
+        if len(source) != len(ser):
+            raise ValueError(
+                f"compute 结果长度({len(ser)})与输入({len(source)})不一致，且未携带 DatetimeIndex；"
+                "重采样/过滤类因子请直接返回 index=date 的 Series（不要依赖按位置对齐）"
+            )
+        if "date" in source.columns:
             idx = pd.to_datetime(source["date"]).to_numpy()
             return pd.Series(ser.to_numpy(), index=idx, name=ser.name)
-        if isinstance(source.index, pd.DatetimeIndex) and len(source) == len(ser):
+        if isinstance(source.index, pd.DatetimeIndex):
             return pd.Series(ser.to_numpy(), index=source.index, name=ser.name)
-        return ser
+        raise ValueError(
+            f"无法为因子 {ser.name!r} 推断交易日索引：输入既无 'date' 列也无 DatetimeIndex，"
+            "请让 compute 返回 index=date 的 Series"
+        )
 
     # ------------------------------------------------------------
     # 标准化

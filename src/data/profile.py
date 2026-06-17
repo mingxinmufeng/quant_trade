@@ -37,7 +37,6 @@
 
 from __future__ import annotations
 
-import struct
 import threading
 from pathlib import Path
 
@@ -46,14 +45,12 @@ from loguru import logger
 
 from ..utils.helpers import format_code, parse_date
 from .sources import _auto_discover_tdx_path
+from .sources.tdx_reader import read_profile
 
 __all__ = ["PROFILE_COLUMNS", "ProfileStore"]
 
 #: 解析后的更名表 schema
 PROFILE_COLUMNS = ("code", "name", "change_date")
-
-#: profile.dat 定长记录字节数
-_RECORD_SIZE = 64
 
 #: 合法更名日范围（剔除脏记录）
 _MIN_DATE, _MAX_DATE = 19900101, 21001231
@@ -133,28 +130,22 @@ class ProfileStore:
             logger.debug(f"profile.dat 文件不存在（tdx_path={self._tdx_path}）")
             return empty
         try:
-            data = f.read_bytes()
+            raw = read_profile(str(f))  # 自洽字节解码（见 src.data.sources.tdx_reader）
         except OSError as exc:
             logger.warning(f"读取 profile.dat 失败: {exc}")
             return empty
+        if raw is None or raw.empty:
+            return empty
+        # 领域归一：剔除脏日期、6 位代码按前缀推断交易所、转 datetime
         recs: list[tuple[str, str, int]] = []
-        n_full = len(data) - (len(data) % _RECORD_SIZE)
-        for i in range(0, n_full, _RECORD_SIZE):
-            r = data[i : i + _RECORD_SIZE]
-            code6 = r[1:7].decode("ascii", "ignore").strip("\x00").strip()
-            if len(code6) != 6 or not code6.isdigit():
-                continue
-            name = r[8:17].split(b"\x00")[0].decode("gbk", "ignore").strip()
-            if not name:
-                continue
-            date = struct.unpack("<I", r[17:21])[0]
-            if not (_MIN_DATE <= date <= _MAX_DATE):
+        for code6, name, date in raw.itertuples(index=False):
+            if not (_MIN_DATE <= int(date) <= _MAX_DATE):
                 continue
             try:
-                std = format_code(code6)
+                std = format_code(str(code6))
             except Exception:
                 continue
-            recs.append((std, name, date))
+            recs.append((std, str(name), int(date)))
         if not recs:
             return empty
         df = pd.DataFrame(recs, columns=list(PROFILE_COLUMNS))

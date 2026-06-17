@@ -57,14 +57,14 @@ TUSHARE_TOKEN=your_token_here
 ### 3. 运行回测
 
 ```bash
-# 更新数据
-python src/main.py fetch
+# 更新数据（须以模块方式运行：src 内部为相对导入，直接 python src/main.py 会报 ImportError）
+python -m src.main fetch
 
 # 运行回测
-python src/main.py backtest --start 2020-01-01 --end 2024-12-31
+python -m src.main backtest --start 2020-01-01 --end 2024-12-31
 
 # 超参优化
-python src/main.py optimize --strategy ma_rsi --trials 100
+python -m src.main optimize --strategy ma_rsi --trials 100
 ```
 
 ## 数据同步三步走
@@ -265,7 +265,7 @@ print(f"最大回撤: {result.max_drawdown:.2%}")
 ### 命令行使用
 
 ```bash
-python src/main.py optimize \
+python -m src.main optimize \
     --strategy ma_rsi \
     --start 2020-01-01 \
     --end 2023-12-31 \

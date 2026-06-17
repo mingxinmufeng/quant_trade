@@ -56,12 +56,20 @@ __all__ = [
     "SalesYieldFactor",
 ]
 
-#: 标准财务字段（横截面 DataFrame 的列名约定；数据层取数后归一到这些名字）
+#: 标准财务字段（横截面 DataFrame 的列名约定；数据层取数后归一到这些名字）。
+#:
+#: ⚠️ 待对接：当前数据层（src/data/sources/*）只产出行情 OHLCV（fetch_daily/
+#: fetch_minute），**尚未生产以下任何财务字段**。本模块是前瞻性框架，等上游喂入含这些
+#: 列的点位横截面才可用；现阶段实盘/回测请仅使用技术因子（src/factor/technical.py）。
+#: 后续接入路线：估值/规模/每股（pe/pb/ps/total_mv/dividend_yield/eps/bps）取自
+#: tushare daily_basic（日频）；盈利/成长/杠杆（roe/roa/margin/yoy/debt_to_asset）取自
+#: fina_indicator（季频，须按公告日<=as_of 做 PIT 对齐防未来函数）。
 STANDARD_FIELDS: dict[str, str] = {
-    # 估值（原始比率，越小越便宜）
+    # 估值比率（原始比率，越小越便宜；用作因子时取倒数转收益率口径）
     "pe": "市盈率（TTM）",
     "pb": "市净率（MRQ）",
     "ps": "市销率（TTM）",
+    # 股息率（已是收益率口径，越大越优；勿与上面"越小越便宜"混为一类）
     "dividend_yield": "股息率",
     # 盈利质量（越大越好）
     "roe": "净资产收益率",

@@ -4,7 +4,8 @@ numpy>=2.0.0
 pyarrow>=19.0.0
 
 # ===== A股数据源 =====
-pytdx>=1.72               # 本地通达信 vipdoc 读取（日线/分钟，零网络）
+# 通达信本地读取（vipdoc 行情 / gbbq 权息 / profile.dat 更名）已由自洽模块
+# src.data.sources.tdx_reader 实现，零网络、不再依赖 pytdx。
 akshare>=1.18.60          # 主数据源，更新频繁，不锁死
 baostock>=0.9.1           # 备用，免费日线+财务数据
 tushare>=1.4.29           # 备用，需token

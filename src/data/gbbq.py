@@ -14,7 +14,7 @@
 2. **增量触发器**：``last_event_date(code)`` 给出某股最近一次除权除息日；若它不晚于
    已落盘因子表的覆盖日，则因子不可能变化，``fetcher`` 可据此**跳过外部源的全量拉取**。
 
-gbbq 二进制结构（``pytdx.reader.GbbqReader``，逐条 ``<B7sIBffff``）：
+gbbq 二进制结构（解密+解析见 ``src.data.sources.tdx_reader.read_gbbq``，逐条 ``<B7sIBffff``）：
 
     market(0=SZ,1=SH,2=BJ) | code(6位) | datetime(YYYYMMDD 整数) | category(类别) |
     f1=hongli_panqianliutong | f2=peigujia_qianzongguben |
@@ -48,6 +48,7 @@ from loguru import logger
 
 from ..utils.helpers import format_code, parse_date
 from .sources import _auto_discover_tdx_path
+from .sources.tdx_reader import read_gbbq
 
 #: gbbq 类别：除权除息（唯一影响复权的类别）
 GBBQ_CATEGORY_EXDIV = 1
@@ -217,12 +218,7 @@ class GbbqStore:
             logger.debug(f"gbbq 文件不存在（tdx_path={self._tdx_path}）")
             return pd.DataFrame()
         try:
-            from pytdx.reader import GbbqReader
-        except ImportError:
-            logger.warning("未安装 pytdx，无法读取 gbbq（gbbq 因子源/触发器不可用）")
-            return pd.DataFrame()
-        try:
-            df = GbbqReader().get_df(str(f))
+            df = read_gbbq(str(f))  # 自洽解密+解析（见 src.data.sources.tdx_reader）
         except Exception as exc:
             logger.warning(f"读取 gbbq 失败: {exc}")
             return pd.DataFrame()

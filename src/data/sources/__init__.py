@@ -25,7 +25,6 @@ from .base import (
 from .pytdx_source import (
     PytdxLocalSource,
     _auto_discover_tdx_path,
-    _build_daily_reader,
 )
 from .tushare_source import TushareSource
 
@@ -59,7 +58,6 @@ __all__ = [
     "TushareSource",
     "_ak_call",
     "_auto_discover_tdx_path",
-    "_build_daily_reader",
     "_is_proxy_error",
     "_raise_if_proxy_error",
     "build_source",

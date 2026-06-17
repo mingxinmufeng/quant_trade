@@ -92,7 +92,8 @@ class TechnicalFactor(FactorBase):
         result = self._calc(data)
         ser = self._to_series(result, data)
         ser.name = self.factor_name
-        return self._with_date_index(ser, data)
+        # 交易日索引对齐统一交给基类 _as_dated_series（结果恒与 data 等长，走按位置对齐）
+        return self._as_dated_series(ser, data)
 
     def _calc(self, data: pd.DataFrame):
         """子类实现：返回指标值（Series / ndarray / None）。"""
@@ -109,16 +110,6 @@ class TechnicalFactor(FactorBase):
         if arr.shape[0] != len(data):
             return pd.Series(np.nan, index=data.index, dtype="float64")
         return pd.Series(arr, index=data.index, dtype="float64")
-
-    @staticmethod
-    def _with_date_index(ser: pd.Series, data: pd.DataFrame) -> pd.Series:
-        """若 ``data`` 含 date 列或 DatetimeIndex，则把结果改用交易日为索引。"""
-        if "date" in data.columns:
-            idx = pd.to_datetime(data["date"]).to_numpy()
-            return pd.Series(ser.to_numpy(), index=idx, name=ser.name)
-        if isinstance(data.index, pd.DatetimeIndex):
-            return pd.Series(ser.to_numpy(), index=data.index, name=ser.name)
-        return ser
 
 
 # ============================================================
