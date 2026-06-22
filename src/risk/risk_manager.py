@@ -29,19 +29,45 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from ..utils.helpers import truncate_to_100
+from ..utils.helpers import format_code, truncate_to_100
 
 if TYPE_CHECKING:  # 仅类型提示，避免任何潜在导入环
     from ..engine.execution import Order
     from ..engine.portfolio import Portfolio
 
-__all__ = ["RiskManager"]
+__all__ = ["RiskManager", "load_industry_map"]
 
 _EPS = 1e-9
+
+
+def load_industry_map(
+    path: str | Path = "data_store/industry_map.parquet",
+) -> dict[str, str]:
+    """读取 ``scripts/fetch_industry_map.py`` 落盘的行业表为 ``{code: 行业}``。
+
+    供 :meth:`RiskManager.clip_position_size` 的 ``industry_map`` 参数使用。
+    代码统一过 :func:`format_code` 规范化；文件缺失或读失败返回空字典（退化为仅单票限仓）。
+
+    注意：落盘为**拉取日快照**，长跨度回测直接用会有行业漂移/前视，需自行权衡。
+    """
+    p = Path(path)
+    if not p.exists():
+        logger.warning(f"行业映射文件不存在: {p}（先跑 scripts/fetch_industry_map.py）")
+        return {}
+    try:
+        import pandas as pd
+
+        df = pd.read_parquet(p)
+        df = df.dropna(subset=["code", "industry"])
+        return {format_code(str(c)): str(ind) for c, ind in zip(df["code"], df["industry"])}
+    except Exception as exc:
+        logger.warning(f"读取行业映射 {p} 失败: {exc}")
+        return {}
 
 
 class RiskManager:
