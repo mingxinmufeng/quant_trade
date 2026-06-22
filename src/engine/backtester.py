@@ -195,6 +195,9 @@ class Backtester:
 
         # 每只股票按日期建索引，便于 O(1) 取 bar
         indexed = {code: df.set_index("date") for code, df in data.items()}
+        # 各股最后一根行情日：用于退市/行情终止后的持仓强制清仓（防幻值）
+        last_dt = {code: df.index.max() for code, df in indexed.items() if not df.empty}
+        final_day = trading_days[-1]
 
         pf = Portfolio(self.initial_capital, t1_cash_freeze=self.t1_cash_freeze)
         # 风控初始化（仅在显式注入 risk_manager 时启用止损/熔断/仓位限制）
@@ -219,6 +222,8 @@ class Backtester:
 
             # 收盘估值
             pf.mark_to_market(self._close_prices(indexed, day))
+            # 退市/行情终止的持仓强制清仓（在估值后、记录权益前，避免幻值持续计入净值）
+            self._liquidate_ended_positions(pf, day, last_dt, final_day)
             equity_dates.append(day)
             equity_values.append(pf.total_value)
             positions_log.append(pf.position_shares())
@@ -364,6 +369,34 @@ class Backtester:
             ratio = ExecutionEngine.detect_ex_factor_ratio(df.loc[prev_day, "adj_factor"], df.loc[day, "adj_factor"])
             if ratio > 1.001:
                 self.execution.apply_corporate_action(pf, code, ratio)
+
+    def _liquidate_ended_positions(self, pf, day, last_dt: dict, final_day) -> None:
+        """对"行情已终止"（最后一根数据早于回测末日）的持仓按最后市价强制清仓。
+
+        退市股在退市日后即无行情：若仍被持有，``mark_to_market`` 会永久按最后已知价
+        计入净值（幻值），且该笔持仓永远不会被卖出 → 已实现盈亏 / 交易统计漏记。本方法
+        在某股**最后一根数据之后**的首个交易日把其持仓按最后市价强制离场（退市离场不受
+        T+1 约束），使盈亏正确入账、净值不再挂幻值。
+
+        注意：仅处理"行情早于回测末日就终止"的股票；正常持有到回测末日的仓位按惯例保留
+        （末日按市值估值，不强平）。中途停牌但后续复牌的股票其 ``last_dt`` 为真实末日，
+        不会被误清。
+        """
+        for code in list(pf.positions.keys()):
+            pos = pf.get_position(code)
+            if pos is None or pos.shares <= 0:
+                continue
+            ld = last_dt.get(code)
+            if ld is None or ld >= final_day or day <= ld:
+                continue
+            shares = pos.shares
+            px = pos.last_price if pos.last_price > 0 else pos.avg_cost
+            pos.frozen = 0  # 退市 / 行情终止强制离场，不受 T+1 冻结约束
+            fee = self.execution.commission(shares * px, is_buy=False)
+            pf.sell(code, shares, px, fee, day.date())
+            logger.info(
+                f"[{code}] 行情于 {ld.date()} 终止（退市/停更），按最后市价 {px:.4f} 强制清仓 {shares} 股"
+            )
 
     # ------------------------------------------------------------
     # 结果组装
