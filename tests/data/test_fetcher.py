@@ -253,6 +253,70 @@ def test_minute_resample():
 
 
 # ============================================================
+# _should_skip_factor：因子刷新增量触发器（按因子源口径分流）
+# ============================================================
+
+
+def test_should_skip_factor_external_uses_raw_advance(tmp_path):
+    """外部源(sina)：触发器按"原始日线是否较因子表新增交易日"判定，与 gbbq 无关。
+
+    回归 P0-1：旧逻辑用 gbbq 事件门控外部源——gbbq 不可用时永不跳过、gbbq 滞后于外部源
+    时会误跳过真实更新。新逻辑：因子已覆盖到原始最新交易日 → 跳过；原始新增交易日 → 必刷新。
+    """
+    from src.data.fetcher import DataFetcher
+
+    f = DataFetcher(store_path=tmp_path, tdx_path="__nonexistent__",
+                    suspend_enabled=False, factor_source="sina")
+    assert not f._gbbq.available  # 离线无 gbbq；旧逻辑此时会一律返回 False（永不跳过）
+
+    raw = _raw_daily("600000.SH", n=10)
+    f._store.write_raw("600000.SH", "daily", raw)
+
+    # 因子覆盖到与原始同一最新交易日 → 无新交易日 → 跳过（证明外部源有了独立的正确触发器）
+    f._store.write_factor("600000.SH", pd.DataFrame({"date": raw["date"], "cum_factor": [1.0] * 10}))
+    assert f._should_skip_factor("600000.SH", gbbq=False) is True
+
+    # 因子只覆盖前 8 日、原始已到第 10 日 → 新增交易日 → 必须刷新（不得误跳过）
+    f._store.write_factor("600000.SH", pd.DataFrame({"date": raw["date"].iloc[:8], "cum_factor": [1.0] * 8}))
+    assert f._should_skip_factor("600000.SH", gbbq=False) is False
+
+
+def test_should_skip_factor_no_factor_file_never_skips(tmp_path):
+    """本地尚无因子表（无基准）→ 不跳过。"""
+    from src.data.fetcher import DataFetcher
+
+    f = DataFetcher(store_path=tmp_path, tdx_path="__nonexistent__",
+                    suspend_enabled=False, factor_source="sina")
+    f._store.write_raw("600000.SH", "daily", _raw_daily("600000.SH", n=5))
+    assert f._should_skip_factor("600000.SH", gbbq=False) is False
+
+
+def test_should_skip_factor_disabled_never_skips(tmp_path):
+    """factor_skip_via_gbbq=False → 永不跳过（强制每次刷新）。"""
+    from src.data.fetcher import DataFetcher
+
+    f = DataFetcher(store_path=tmp_path, tdx_path="__nonexistent__",
+                    suspend_enabled=False, factor_source="sina", factor_skip_via_gbbq=False)
+    raw = _raw_daily("600000.SH", n=5)
+    f._store.write_raw("600000.SH", "daily", raw)
+    f._store.write_factor("600000.SH", pd.DataFrame({"date": raw["date"], "cum_factor": [1.0] * 5}))
+    assert f._should_skip_factor("600000.SH", gbbq=False) is False
+
+
+def test_should_skip_factor_gbbq_source_needs_gbbq_file(tmp_path):
+    """gbbq 口径但 gbbq 文件不可用 → 不跳过（gbbq 源无触发器依据，绝不退化到外部源逻辑）。"""
+    from src.data.fetcher import DataFetcher
+
+    f = DataFetcher(store_path=tmp_path, tdx_path="__nonexistent__",
+                    suspend_enabled=False, factor_source="gbbq")
+    raw = _raw_daily("600000.SH", n=5)
+    f._store.write_raw("600000.SH", "daily", raw)
+    f._store.write_factor("600000.SH", pd.DataFrame({"date": raw["date"], "cum_factor": [1.0] * 5}))
+    assert not f._gbbq.available
+    assert f._should_skip_factor("600000.SH", gbbq=False) is False
+
+
+# ============================================================
 # load_daily(auto_fetch=)：基准指数缺则按需补拉（如 000300.SH）
 # ============================================================
 

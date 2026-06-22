@@ -395,36 +395,54 @@ class DataFetcher:
             self._gbbq_event_cache = {}
 
     def _should_skip_factor(self, code: str, gbbq: bool = False) -> bool:
-        """增量触发器：本地已有因子表且 gbbq 显示无新除权除息事件 → 因子不会变，跳过刷新。
+        """增量触发器：本地已有因子表且可判定"因子不会变" → 跳过刷新。
 
-        gbbq 是全市场权息本地文件；``cum_factor`` 仅在除权除息日变化。因此当某股最近一次
-        除权除息日不晚于已落盘因子表覆盖的最大日期时，重新（全量）拉取外部源毫无意义。
-        ``gbbq=True`` 时针对 ``factors_gbbq/`` 的并存记录做同样判断。
+        **按因子源口径分流触发器**（关键：外部源不能用 gbbq 事件当依据）：
 
-        保守起见，下列情况**不跳过**（保持原有每次刷新行为）：
+        - **gbbq 口径**（``gbbq=True``，或生效源本就是 gbbq）：用 gbbq 全市场权息文件——
+          该股最近除权除息日不晚于已落盘因子覆盖日则跳过（同源自洽，gbbq 文件既是数据源
+          又是触发器）。
+        - **外部源口径**（sina/tushare/em）：**绝不**以 gbbq 事件为依据——本地通达信权息
+          可能滞后于外部源，会误判"无新事件"从而静默跳过真实的因子更新（产出错误复权价）。
+          改用"本地原始日线是否较因子表**新增了交易日**"：``cum_factor`` 仅在除权日（必为
+          交易日）新增行，故无新交易日即不可能有新因子；有新交易日则必须刷新。
+
+        保守起见，下列情况**不跳过**（保持每次刷新行为）：
         - 关闭了该优化（``factor_skip_via_gbbq=False``）；
         - 本地尚无对应因子表（无基准）；
-        - gbbq 文件不可用（无触发器依据）。
+        - gbbq 口径但 gbbq 文件不可用 / 外部口径但本地无原始日线（无触发器依据）。
         """
         if not self._factor_skip_via_gbbq:
-            return False
-        if not self._gbbq.available:
             return False
         existing = self._store.read_factor(code, gbbq=gbbq)
         if existing is None or existing.empty:
             return False
-        try:
-            # 优先走预热缓存（O(1)），缓存未建时回退逐股查询
-            if self._gbbq_event_cache:
-                last_ev = self._gbbq_event_cache.get(code)
-            else:
-                last_ev = self._gbbq.last_event_date(code)
-        except Exception as exc:
-            logger.debug(f"[{code}] gbbq 事件查询失败，不跳过因子刷新: {exc}")
-            return False
         stored_max = pd.to_datetime(existing["date"]).max()
-        # 无任何除权事件，或最近事件不晚于已落盘覆盖日 → 因子不会变化
-        return last_ev is None or last_ev <= stored_max
+        if pd.isna(stored_max):
+            return False
+
+        # gbbq 口径（gbbq 文件，或生效源本就是 gbbq）：用 gbbq 事件触发（同源自洽）
+        if gbbq or self._factor_source == "gbbq":
+            if not self._gbbq.available:
+                return False
+            try:
+                # 优先走预热缓存（O(1)），缓存未建时回退逐股查询
+                if self._gbbq_event_cache:
+                    last_ev = self._gbbq_event_cache.get(code)
+                else:
+                    last_ev = self._gbbq.last_event_date(code)
+            except Exception as exc:
+                logger.debug(f"[{code}] gbbq 事件查询失败，不跳过因子刷新: {exc}")
+                return False
+            # 无任何除权事件，或最近事件不晚于已落盘覆盖日 → 因子不会变化
+            return last_ev is None or last_ev <= stored_max
+
+        # 外部源口径：原始日线未较因子表新增交易日 → 不可能有新因子（与 gbbq 文件无关）
+        raw = self._store.read_raw(code, "daily")
+        if raw is None or raw.empty or "date" not in raw.columns:
+            return False
+        raw_max = pd.to_datetime(raw["date"]).max()
+        return pd.notna(raw_max) and raw_max <= stored_max
 
     def _update_factor(self, code: str) -> None:
         """刷新复权因子表：生效因子写 ``factors/``，并把 gbbq 自算因子并存写 ``factors_gbbq/``。
