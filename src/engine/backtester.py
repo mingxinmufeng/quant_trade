@@ -146,7 +146,7 @@ class Backtester:
         self.risk_free_rate = float(_get(bt, "risk_free_rate", 0.025))
         self.benchmark_code = _get(bt, "benchmark", "000300.SH")
         ex = _section(config, "execution")
-        self.t1_cash_freeze = bool(_get(ex, "t1_cash_freeze", True))
+        self.t1_cash_freeze = bool(_get(ex, "t1_cash_freeze", False))
         self.position_size = float(
             position_size if position_size is not None else _get(rk, "max_single_position", 0.20)
         )

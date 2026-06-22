@@ -9,8 +9,10 @@ A 股资金 / 持仓规则
 -------------------
 - **T+1 持仓冻结**：买入当日新增股数 ``frozen``，**当日不可卖**；下一交易日开盘前
   （:meth:`settle_new_day`）解冻为可卖。
-- **T+1 资金冻结**（``t1_cash_freeze=True``）：卖出当日所得资金计入 ``frozen_cash``，
-  当日不可再用于买入；下一交易日解冻。可通过开关关闭。
+- **T+1 资金（默认不冻结，符合 A 股真实规则）**：A 股卖出所得资金**当日即可继续买入**
+  股票（仅不可当日转出银行，回测不模拟出金），故默认 ``t1_cash_freeze=False``。设 ``True``
+  则把卖出所得计入 ``frozen_cash`` 当日不可再买——一种**更保守、非真实**的口径，仅按需启用。
+  注意"卖出当日买入的股票"始终受 T+1 约束（由 ``Position.frozen`` 管），与本资金开关无关。
 - **可用资金**：``available_cash = cash - frozen_cash``（``cash`` 为含冻结的总现金）。
 - **总资产**：``total_value = cash + market_value``。
 
@@ -80,10 +82,11 @@ class Portfolio:
 
     Args:
         initial_cash: 初始资金（元）。
-        t1_cash_freeze: 卖出资金是否 T+1 冻结（A 股真实规则 = True）。
+        t1_cash_freeze: 卖出所得是否 T+1 冻结而当日不可再买。默认 ``False``（符合 A 股：
+            回款当日可买）；``True`` 为更保守的非真实口径。
     """
 
-    def __init__(self, initial_cash: float, t1_cash_freeze: bool = True) -> None:
+    def __init__(self, initial_cash: float, t1_cash_freeze: bool = False) -> None:
         self.initial_cash = float(initial_cash)
         self.cash = float(initial_cash)         # 含冻结的总现金
         self.frozen_cash = 0.0                  # 当日卖出冻结资金（T+1）

@@ -106,7 +106,7 @@ class MinuteBacktester:
         ex = _section(config, "execution")
         self.initial_capital = float(_get(bt, "initial_capital", 1_000_000))
         self.risk_free_rate = float(_get(bt, "risk_free_rate", 0.025))
-        self.t1_cash_freeze = bool(_get(ex, "t1_cash_freeze", True))
+        self.t1_cash_freeze = bool(_get(ex, "t1_cash_freeze", False))
         self.position_size = float(
             position_size if position_size is not None else _get(rk, "max_single_position", 0.20)
         )

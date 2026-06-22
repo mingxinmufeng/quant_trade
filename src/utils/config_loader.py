@@ -94,7 +94,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "mode": "next_open",
         "volume_pct_limit": 0.10,
         "min_order_amount": 1000,
-        "t1_cash_freeze": True,
+        "t1_cash_freeze": False,
         "slippage": {
             "type": "percent",
             "fixed_amount": 0.01,

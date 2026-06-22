@@ -55,7 +55,7 @@ execution:
   mode: "next_open"                     # 撮合时机：next_open=次日开盘成交（推荐，防未来函数）| close=当日收盘成交
   volume_pct_limit: 0.10                # 单笔成交量上限：当日该股票总成交量的占比（默认 10%）
   min_order_amount: 1000                # 最小下单金额（元），低于此值的订单直接忽略
-  t1_cash_freeze: true                  # 卖出资金是否 T+1 解冻（A 股真实规则 = true）
+  t1_cash_freeze: false                 # 卖出回款当日是否冻结不可再买。false=符合A股(回款当日可买,仅不可出金)；true=更保守的非真实口径
 
   # 滑点模型（三选一）
   slippage:
