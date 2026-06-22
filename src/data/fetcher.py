@@ -1103,7 +1103,13 @@ class DataFetcher:
                 return
             if df is None or df.empty:
                 return
-            d = df[df["list_status"].astype("string").str.upper() == "D"]
+            # 退市判定：状态为 D，**或** 已填退市日（tushare 对退市整理期/刚摘牌的边界股
+            # 常出现 delist_date 已填、list_status 仍 L 的口径滞后，如 688287.SH 摘牌于
+            # 20260610 却仍标 L）。只要有退市日即视为退市并据此截断，避免对其无效联网拉取。
+            status = df["list_status"].astype("string").str.upper()
+            delist_raw = df["delist_date"].astype("string").str.strip()
+            has_delist = delist_raw.notna() & ~delist_raw.isin(["", "nan", "NaN", "None"])
+            d = df[(status == "D") | has_delist]
             for code, raw in zip(d["ts_code"].tolist(), d["delist_date"].tolist(), strict=True):
                 dt = pd.to_datetime(str(raw), format="%Y%m%d", errors="coerce")
                 if pd.notna(dt):
