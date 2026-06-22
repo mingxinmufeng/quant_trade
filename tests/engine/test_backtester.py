@@ -132,6 +132,31 @@ def test_delisted_position_force_liquidated():
     assert last_pos.get("000001.SZ", 0) > 0, "正常持有到末日的股票不应被误清"
 
 
+def test_benchmark_beta_date_aligned_partial_coverage():
+    """P1-1：基准不覆盖回测起点时，beta 须按日期对齐而非按位置。
+
+    构造 strat 与 benchmark 在重叠日（D3/D4/D5）日收益完全相同 → 正确对齐时 beta==1；
+    旧的按位置拼接会把 strat 的 D1/D2/D3 与 bench 的 D3/D4/D5 错配，得到 beta≠1。
+    """
+    from src.engine import Backtester
+
+    dates = pd.bdate_range("2024-01-01", periods=6)
+    strat_rets = [0.05, -0.02, 0.10, -0.03, 0.04]   # D1..D5
+    eq = [1.0]
+    for r in strat_rets:
+        eq.append(eq[-1] * (1 + r))
+    equity_curve = pd.Series(eq, index=dates)
+    strat_returns = equity_curve.pct_change().dropna()
+
+    # benchmark 仅覆盖后 4 日（缺 D0/D1）；重叠日 D3/D4/D5 收益 = strat 的 [0.10,-0.03,0.04]
+    bench = pd.Series(
+        [100.0, 110.0, 110.0 * 0.97, 110.0 * 0.97 * 1.04], index=dates[2:6]
+    )
+    bt = Backtester(config={"backtest": {"initial_capital": 1_000_000}})
+    _, _, beta = bt._benchmark_metrics(equity_curve, strat_returns, 0.0, bench)
+    assert abs(beta - 1.0) < 1e-6, f"beta 应≈1（日期对齐），实得 {beta}"
+
+
 def test_risk_manager_position_cap_wired(sample_data):
     """注入 RiskManager 时，单票上限应裁减建仓市值（验证风控已接入回测主循环）。"""
     from src.engine import Backtester

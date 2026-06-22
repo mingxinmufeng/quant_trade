@@ -420,7 +420,8 @@ class Backtester:
         benchmark: pd.Series | None,
     ) -> BacktestResult:
         eq = equity_curve.to_numpy(dtype="float64")
-        returns = pd.Series(eq).pct_change().dropna()
+        # 保留 DatetimeIndex（供基准按日期对齐，避免位置错配）；sharpe 用 .tolist() 不受影响
+        returns = equity_curve.pct_change().dropna()
         n_periods = max(1, len(eq) - 1)
 
         total_return = float(eq[-1] - 1.0)
@@ -472,8 +473,9 @@ class Backtester:
         n = max(1, len(b) - 1)
         bench_annual = float((1 + bench_return) ** (TRADING_DAYS_PER_YEAR / n) - 1.0)
         bench_ret = b.pct_change().dropna()
-        # 对齐两条日收益
-        aligned = pd.concat([strat_returns.reset_index(drop=True), bench_ret.reset_index(drop=True)], axis=1).dropna()
+        # 按**日期**对齐两条日收益（inner join）——绝不按位置拼接：基准不覆盖回测起点时
+        # 两条序列各自 dropna 后长度/起点不同，按位置会把错位日期的收益配对，算出错误 beta。
+        aligned = pd.concat([strat_returns, bench_ret], axis=1, join="inner").dropna()
         beta = 0.0
         if len(aligned) >= 2:
             sr, br = aligned.iloc[:, 0].to_numpy(), aligned.iloc[:, 1].to_numpy()
