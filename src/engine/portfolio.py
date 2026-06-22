@@ -24,8 +24,8 @@ A 股资金 / 持仓规则
 
 分红送股（除权除息）
 --------------------
-由 :mod:`execution` 在除权日触发，调用 :meth:`apply_split`（送转，股数×比例并整手）与
-:meth:`add_cash_dividend`（现金分红，税后每股红利×持股数计入现金）。
+由 :mod:`execution` 在除权日触发，调用 :meth:`apply_split`（送转，股数×比例，默认保留零股）与
+:meth:`add_cash_dividend`（现金分红，税后每股红利×持股数计入现金，并记为当期已实现收益，不冲减成本）。
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ class Position:
     shares: int = 0                 # 总持股
     frozen: int = 0                 # 当日买入冻结（T+1 不可卖）
     avg_cost: float = 0.0           # 含买入手续费的每股成本（成本基）
-    open_date: date | None = None  # 当前持仓的建仓日（清仓后重置）
+    open_date: date | datetime | None = None  # 建仓时点（清仓后重置）：日级为 date，分钟级为 datetime
     last_price: float = 0.0         # 最新市价（mark-to-market）
 
     @property
@@ -162,7 +162,7 @@ class Portfolio:
         pos.avg_cost = new_cost_value / pos.shares
         pos.last_price = float(price)
         if pos.open_date is None:
-            pos.open_date = _to_date(trade_date)
+            pos.open_date = _to_dt(trade_date)
 
     def sell(self, code: str, shares: int, price: float, commission: float, trade_date) -> float:
         """卖出记账，返回本笔已实现盈亏（净额，已扣买卖两端费用）。
@@ -187,7 +187,7 @@ class Portfolio:
         self.realized_pnl += pnl
 
         entry_date = pos.open_date
-        td = _to_date(trade_date)
+        td = _to_dt(trade_date)
         self.realized_trades.append(
             {
                 "code": code,
@@ -232,9 +232,11 @@ class Portfolio:
     # 分红送股（除权日由 execution 触发）
     # ------------------------------------------------------------
 
-    def apply_split(self, code: str, ratio: float, round_lot: bool = True) -> int:
-        """送股/转增：持仓股数 ×= ratio（``round_lot`` 时向下取整到 100 股）。
+    def apply_split(self, code: str, ratio: float, round_lot: bool = False) -> int:
+        """送股/转增：持仓股数 ×= ratio。
 
+        默认 ``round_lot=False``——A 股送转产生的**零股可保留**（且可一次性卖出），整手取整
+        会凭空蒸发零股、低估持仓与收益；仅在确需整手时显式传 ``round_lot=True``。
         总成本不变 → ``avg_cost`` 等比下调。返回调整后的股数。``ratio<=1`` 不处理。
         """
         pos = self.positions.get(code)
@@ -253,15 +255,18 @@ class Portfolio:
         return new_shares
 
     def add_cash_dividend(self, code: str, per_share_after_tax: float) -> float:
-        """现金分红：现金 += 持股数 × 税后每股红利。返回入账现金（无持仓返回 0）。"""
+        """现金分红：现金 += 持股数 × 税后每股红利，并计入已实现收益。返回入账现金（无持仓返回 0）。
+
+        分红视为**当期现金收入**记入 ``realized_pnl``，**不冲减** ``avg_cost``：成本基始终
+        是真实买入成本，既不会被压成负数，也不会扭曲后续卖出的已实现盈亏（旧实现用
+        ``max(0, cost-amount)`` 冲减成本，超额分红会被静默吞掉，导致卖出 pnl 虚高）。
+        """
         pos = self.positions.get(code)
         if pos is None or pos.shares <= 0 or per_share_after_tax <= 0:
             return 0.0
         amount = pos.shares * float(per_share_after_tax)
         self.cash += amount
-        # 分红降低持仓成本基（可选；保持总收益一致）
-        new_cost_value = max(0.0, pos.cost_value - amount)
-        pos.avg_cost = new_cost_value / pos.shares if pos.shares else 0.0
+        self.realized_pnl += amount          # 分红为当期现金收益，成本基不变
         logger.debug(f"[{code}] 现金分红 {amount:.2f}（每股税后 {per_share_after_tax:.4f}）")
         return amount
 
@@ -272,7 +277,7 @@ class Portfolio:
     def snapshot(self, trade_date) -> dict:
         """返回当日账户快照（供 backtester 组装净值曲线 / 持仓表）。"""
         return {
-            "date": _to_date(trade_date),
+            "date": _to_dt(trade_date),
             "cash": self.cash,
             "frozen_cash": self.frozen_cash,
             "available_cash": self.available_cash,
@@ -289,15 +294,17 @@ class Portfolio:
         )
 
 
-def _to_date(d: str | date | datetime) -> date:
-    """归一为 ``datetime.date``。"""
-    if isinstance(d, datetime):
-        return d.date()
-    if isinstance(d, date):
+def _to_dt(d: str | date | datetime) -> date | datetime:
+    """归一时间戳但**不截断到日**：``datetime``/``date`` 原样返回，``str`` → ``pd.Timestamp``。
+
+    日级回测传入 ``date`` → 仍得 ``date``（行为与旧 ``_to_date`` 一致）；分钟级传入
+    ``datetime`` → 保留时分秒，使 ``open_date`` 与成交记录的 entry/exit 具备日内精度。
+    """
+    if isinstance(d, (datetime, date)):  # datetime 是 date 的子类，二者均原样返回
         return d
     import pandas as pd  # 局部导入，避免无谓依赖
 
-    return pd.Timestamp(d).date()
+    return pd.Timestamp(d)
 
 
 # ============================================================

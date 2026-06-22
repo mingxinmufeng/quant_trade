@@ -107,6 +107,7 @@ class ExecutionEngine:
         commission_rate: float = 0.00025,
         stamp_duty: float = 0.0005,
         min_commission: float = 5.0,
+        intraday: bool = False,
         risk_manager: Any | None = None,
     ) -> None:
         self.slippage_type = str(slippage_type).lower().strip()
@@ -122,6 +123,8 @@ class ExecutionEngine:
         self.commission_rate = float(commission_rate)
         self.stamp_duty = float(stamp_duty)
         self.min_commission = float(min_commission)
+        #: 日内（分钟级）模式：把成交价夹进当日涨跌停区间；日级（=False）行为不变
+        self.intraday = bool(intraday)
         self.risk_manager = risk_manager
 
     @classmethod
@@ -142,6 +145,7 @@ class ExecutionEngine:
             commission_rate=_get(rk, "commission_rate", 0.00025),
             stamp_duty=_get(rk, "stamp_duty", 0.0005),
             min_commission=_get(rk, "min_commission", 5.0),
+            intraday=_get(ex, "intraday", False),
             risk_manager=risk_manager,
         )
 
@@ -159,13 +163,33 @@ class ExecutionEngine:
         t = self.tick_size
 
         if self.slippage_type == "open_gap":
-            return base  # 直接用实际开盘/收盘价，不另加滑点（已是合法报价档）
+            px = base  # 直接用实际开盘/收盘价，不另加滑点（已是合法报价档）
+        else:
+            slip = self.fixed_amount if self.slippage_type == "fixed" else base * self.percent_rate
+            slip = max(slip, self.min_ticks * t)        # 保底至少 min_ticks 个 tick
+            px = base + slip if is_buy else base - slip
+            px = max(px, t)                              # 不为非正
+            px = self._round_to_tick(px, is_buy)
+        if self.intraday:
+            px = self._clamp_to_limit(px, bar, is_buy)   # 日内：成交价不越当日涨跌停
+        return px
 
-        slip = self.fixed_amount if self.slippage_type == "fixed" else base * self.percent_rate
-        slip = max(slip, self.min_ticks * t)        # 保底至少 min_ticks 个 tick
-        px = base + slip if is_buy else base - slip
-        px = max(px, t)                              # 不为非正
-        return self._round_to_tick(px, is_buy)
+    def _clamp_to_limit(self, px: float, bar: dict[str, float], is_buy: bool) -> float:
+        """日内模式：把成交价夹进当日涨跌停区间（买不超 ``limit_up``、卖不低 ``limit_down``）。
+
+        滑点叠加后买价可能越过 ``limit_up``、卖价越过 ``limit_down``——现实中不可能成交在停板外，
+        故夹到停板价。``limit_up/limit_down`` 缺失（NaN）时不夹。完全封板（一字）由
+        :meth:`is_one_word_up`/:meth:`is_one_word_down` 在 :meth:`match` 处直接拒单。
+        """
+        if is_buy:
+            lu = bar.get("limit_up")
+            if not self._is_nan(lu):
+                px = min(px, float(lu))
+        else:
+            ld = bar.get("limit_down")
+            if not self._is_nan(ld):
+                px = max(px, float(ld))
+        return px
 
     def _round_to_tick(self, px: float, is_buy: bool) -> float:
         """归到合法报价档：买入向上取整、卖出向下取整（对己方不利，保守）。"""
@@ -349,7 +373,9 @@ class ExecutionEngine:
         if cash_dividend_per_share_after_tax > 0:
             portfolio.add_cash_dividend(code, cash_dividend_per_share_after_tax)
         if factor_ratio > 1.001:
-            portfolio.apply_split(code, factor_ratio)
+            # 不整手：A 股送转产生的零股可保留并一次性卖出（execution._match_sell 已支持
+            # 清仓卖零股）。整手取整会凭空蒸发零股、低估持仓与收益。
+            portfolio.apply_split(code, factor_ratio, round_lot=False)
 
     # ------------------------------------------------------------
     # 内部：状态置位
