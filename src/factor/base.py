@@ -193,6 +193,16 @@ class FactorBase(ABC):
         """
         if method not in NORMALIZE_METHODS:
             raise ValueError(f"未知标准化方法 {method!r}（支持 {NORMALIZE_METHODS}）")
+        # 防未来函数守卫：normalize/winsorize 用**全样本**统计量（mean/std/分位）。这对
+        # 横截面因子（index=code，单一时间截面）正确；但若误传**时序**因子（index=date），
+        # 当期值会吃到未来的统计量 → 未来函数。检测到时间索引即告警，引导用
+        # normalize_cross_section 按交易日分组做截面标准化。
+        if isinstance(getattr(factor, "index", None), pd.DatetimeIndex):
+            logger.warning(
+                f"normalize 收到时间索引(DatetimeIndex)的因子 {getattr(factor, 'name', None)!r}："
+                "将用全样本统计量标准化，对时序因子会引入未来函数（look-ahead）。"
+                "截面标准化请改用 normalize_cross_section（按交易日逐行）。"
+            )
         s = pd.to_numeric(factor, errors="coerce").astype("float64")
         if winsorize is not None:
             s = self._winsorize(s, winsorize)
@@ -216,6 +226,25 @@ class FactorBase(ABC):
             out = (s - med) / iqr if iqr and iqr > 0 else s - med
         out.name = factor.name
         return out
+
+    def normalize_cross_section(
+        self,
+        panel: pd.DataFrame,
+        method: str = "zscore",
+        *,
+        winsorize: float | None = None,
+    ) -> pd.DataFrame:
+        """对因子面板**逐交易日（按行）**做截面标准化，返回同形状 DataFrame。
+
+        ``panel``：``DataFrame(index=date, columns=code)``（如 :meth:`compute_panel` 的输出）。
+        每行是一个**时间截面**，仅用当日截面统计量标准化，**无未来函数**——这是把
+        :meth:`normalize` 安全地用于面板的正确入口（不要对整列时序直接 normalize）。
+        """
+        if panel is None or panel.empty:
+            return panel
+        return panel.apply(
+            lambda row: self.normalize(row, method, winsorize=winsorize), axis=1
+        )
 
     @staticmethod
     def _winsorize(s: pd.Series, ratio: float) -> pd.Series:
