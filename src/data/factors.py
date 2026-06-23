@@ -84,6 +84,7 @@ class FactorProvider:
         std = format_code(code)
         if std in self._cache:
             return self._cache[std]
+        empty = pd.DataFrame(columns=list(FACTOR_COLUMNS.keys()))
         with self._code_lock(std):
             if std in self._cache:  # 等锁期间已被别的线程填充
                 return self._cache[std]
@@ -93,17 +94,18 @@ class FactorProvider:
             except ProxyConfigError:
                 raise
             except Exception as exc:
-                logger.debug(f"[{std}] 复权因子源 {self._source} 失败: {exc}")
-                df = None
+                # 源**异常**（网络/限流/解析）：暂时失败，不缓存，后续可重试
+                logger.warning(f"[{std}] 复权因子源 {self._source} 暂时失败（不缓存，可重试）: {exc}")
+                return empty
             if df is not None and not df.empty:
                 df = df.sort_values("date").reset_index(drop=True)
                 self._cache[std] = df
                 return df
-        logger.warning(
-            f"[{std}] 复权因子主源 {self._source} 暂时失败"
-            f"（不缓存空结果，后续可重试）"
-        )
-        return pd.DataFrame(columns=list(FACTOR_COLUMNS.keys()))
+            # 源**成功但无数据**（该股确无因子，如部分北交所/极早期）：负缓存空表，
+            # 避免全市场刷新时对其每次重发无效请求（与"异常不缓存"区别对待）。
+            self._cache[std] = empty
+            logger.debug(f"[{std}] 复权因子源 {self._source} 无数据，负缓存空表")
+            return empty
 
     def _sleep(self, base: float = _EM_CALL_SLEEP) -> None:
         """防风控节流：基础间隔 + 随机抖动（多线程下错峰，降低被限频概率）。"""
