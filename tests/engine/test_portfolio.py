@@ -43,3 +43,55 @@ def test_share_t1_freeze_independent_of_cash_switch():
         pf.buy("000001.SZ", 1000, 10.0, 5.0, date(2024, 1, 2))
         pos = pf.get_position("000001.SZ")
         assert pos.available == 0                       # 当日买入不可卖
+
+
+def test_buy_insufficient_cash_raises():
+    """买入超过可用资金 → ValueError（撮合层应在调用前裁减，这里是账本最后一道防线）。"""
+    import pytest
+
+    from src.engine import Portfolio
+
+    pf = Portfolio(10_000)
+    with pytest.raises(ValueError):
+        pf.buy("000001.SZ", 10_000, 10.0, 5.0, date(2024, 1, 2))   # 需 ~10万 > 1万
+
+
+def test_sell_exceeds_available_raises():
+    """卖出超过可卖股数（T+1 冻结未解冻）→ ValueError。"""
+    import pytest
+
+    from src.engine import Portfolio
+
+    pf = Portfolio(100_000)
+    pf.buy("000001.SZ", 1000, 10.0, 5.0, date(2024, 1, 2))         # 当日冻结
+    with pytest.raises(ValueError):
+        pf.sell("000001.SZ", 1000, 11.0, 5.0, date(2024, 1, 2))    # 未 settle，available=0
+
+
+def test_apply_split_keeps_zero_lot_and_total_cost():
+    """送转默认保留零股、总成本不变、avg_cost 等比下调（[[portfolio 除权记账口径]]）。"""
+    from src.engine import Portfolio
+
+    pf = Portfolio(100_000)
+    pf.buy("000001.SZ", 1000, 10.0, 0.0, date(2024, 1, 2))         # 成本基 10000
+    pos = pf.get_position("000001.SZ")
+    cost_before = pos.cost_value
+    pf.apply_split("000001.SZ", 1.5)                               # 10 送 5 → ×1.5
+    assert pos.shares == 1500                                      # 保留零股（非整手取整）
+    assert abs(pos.cost_value - cost_before) < 1e-6                # 总成本不变
+    assert abs(pos.avg_cost - 10000 / 1500) < 1e-9                # 等比下调
+
+
+def test_cash_dividend_counts_as_realized_not_cost_offset():
+    """现金分红计入当期已实现收益、不冲减成本基（避免超额分红虚高卖出 pnl）。"""
+    from src.engine import Portfolio
+
+    pf = Portfolio(100_000)
+    pf.buy("000001.SZ", 1000, 10.0, 0.0, date(2024, 1, 2))
+    pos = pf.get_position("000001.SZ")
+    cash_before, avg_before = pf.cash, pos.avg_cost
+    amt = pf.add_cash_dividend("000001.SZ", 0.5)                   # 每股税后 0.5
+    assert abs(amt - 500.0) < 1e-9
+    assert abs(pf.cash - (cash_before + 500.0)) < 1e-9
+    assert abs(pf.realized_pnl - 500.0) < 1e-9                     # 计入已实现
+    assert pos.avg_cost == avg_before                             # 成本基不变
