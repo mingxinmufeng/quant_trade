@@ -207,14 +207,65 @@ class Universe:
     def load(self, force_refresh: bool = False) -> None:
         """加载基础信息表。
 
-        策略（与 ``TradingCalendar`` 一致）：
-        1. ``force_refresh`` → 回源；
-        2. 缓存缺失 → 回源；
-        3. 缓存过期（mtime 距今 > refresh_days）→ 回源，失败但有缓存则 WARNING 沿用；
-        4. 否则直接读缓存。
+        **主源 = 本地 tushare 基础信息**（``stock_basic_tushare.parquet``，L+D+P 全量、含
+        北交所与退市、离线稳定，**与 fetcher 名称/退市表同源** → 消除口径分裂、Universe 离线
+        可用）。缺失或 ``force_refresh`` 时降级到本项目自有缓存 + akshare 远程（见
+        :meth:`_load_legacy`）。
 
         Raises:
-            RuntimeError: 无本地缓存且远程拉取失败。
+            RuntimeError: 无任何可用来源（tushare 文件缺失、本地缓存不存在且远程拉取失败）。
+        """
+        if not force_refresh:
+            df = self._load_from_tushare_basic()
+            if not df.empty:
+                self._basic = df
+                logger.info(
+                    f"股票基础信息已从本地 tushare 基础信息加载 | 总数 {len(df)} | "
+                    f"在市 {int(df['delist_date'].isna().sum())}"
+                )
+                return
+        self._load_legacy(force_refresh)
+
+    def _load_from_tushare_basic(self) -> pd.DataFrame:
+        """从本地 tushare ``stock_basic``（L+D+P 全量）构建基础信息表（离线主源，与 fetcher 同源）。
+
+        规整到 :data:`BASIC_COLUMNS`；剔除脏码（非 ``XXXXXX.SH/SZ/BJ``）。文件缺失 / 无合法
+        记录返回空表（由 :meth:`load` 决定降级）。
+        """
+        path = self._store_path / "stock_basic_tushare.parquet"
+        if not path.exists():
+            return pd.DataFrame()
+        try:
+            df = pd.read_parquet(path)
+        except Exception as exc:
+            logger.warning(f"读取 tushare 基础信息 {path} 失败: {exc}")
+            return pd.DataFrame()
+        if df is None or df.empty or "ts_code" not in df.columns:
+            return pd.DataFrame()
+        d = df[df["ts_code"].astype(str).str.match(r"^\d{6}\.(SH|SZ|BJ)$")].copy()
+        if d.empty:
+            return pd.DataFrame()
+        out = pd.DataFrame()
+        out["code"] = d["ts_code"].astype(str)
+        out["name"] = d["name"].astype(str) if "name" in d.columns else ""
+        out["list_date"] = (
+            pd.to_datetime(d["list_date"].astype(str), format="%Y%m%d", errors="coerce")
+            if "list_date" in d.columns else pd.NaT
+        )
+        out["delist_date"] = (
+            pd.to_datetime(d["delist_date"].astype(str), format="%Y%m%d", errors="coerce")
+            if "delist_date" in d.columns else pd.NaT
+        )
+        out["industry"] = d["industry"].astype(str) if "industry" in d.columns else ""
+        out["exchange"] = out["code"].str.split(".").str[-1]
+        out["market_type"] = out["code"].map(_classify_market)
+        return self._coerce_basic(out)
+
+    def _load_legacy(self, force_refresh: bool = False) -> None:
+        """降级：本项目自有缓存 ``stock_basic.parquet`` + akshare 远程（tushare 文件不可用时）。
+
+        策略：``force_refresh`` / 缓存缺失 / 缓存过期 → akshare 回源（失败但有缓存则沿用）；
+        否则直接读缓存。
         """
         cache_exists = self._cache_file.exists()
         cache_stale = cache_exists and self._is_cache_stale()

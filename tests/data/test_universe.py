@@ -7,6 +7,26 @@ from src.data.profile import ProfileStore
 from src.data.universe import Universe
 
 
+def test_load_prefers_local_tushare_basic(tmp_path):
+    """P2-2：Universe 主读本地 tushare 基础信息（与 fetcher 同源、离线，不联网 akshare）。"""
+    pd.DataFrame({
+        "ts_code": ["600000.SH", "830799.BJ", "688287.SH"],
+        "name": ["浦发银行", "艾融软件", "观典退"],
+        "list_date": ["19991110", "20191120", "20200101"],
+        "delist_date": [None, None, "20260610"],
+        "list_status": ["L", "L", "D"],
+        "industry": ["银行", "软件", ""],
+    }).to_parquet(tmp_path / "stock_basic_tushare.parquet", index=False)
+
+    uni = Universe(store_path=tmp_path, exclude_st=False, exclude_new_ipo=False)
+    assert len(uni.basic_info) == 3
+    assert uni._current_name("600000.SH") == "浦发银行"
+    assert uni._current_name("830799.BJ") == "艾融软件"          # 覆盖北交所
+    # 688287 于 2026-06-10 退市：点位前可交易、点位后不可（防幸存者偏差）
+    assert "688287.SH" in uni.get_tradable_stocks("2025-01-01")
+    assert "688287.SH" not in uni.get_tradable_stocks("2026-12-31")
+
+
 def test_norm_index_code_unifies_suffix_forms():
     """P2-18：同一指数的带/不带后缀形式归一到同一纯数字目录键，避免快照目录分裂。"""
     n = Universe._norm_index_code
