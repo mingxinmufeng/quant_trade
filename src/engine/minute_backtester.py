@@ -77,7 +77,9 @@ class MinuteBacktester:
         store: :class:`~src.data.storage.DataStore`；``run`` 未直接传 data 时用于加载分钟数据。
         freq: 分钟周期（``min1`` / ``min5``）。
         position_size: 单票目标权重；None 时取 ``risk.max_single_position`` 或 0.2。
-        apply_corporate_actions: 是否对持仓做除权调整（仅非复权数据下开启；hfq 默认 False）。
+        apply_corporate_actions: **分钟级暂不支持**，仅保留以与日级签名一致。分钟回测请用
+            hfq 复权口径（送转/分红已折进价格，无需对持仓做除权调整）；传 ``True`` 会抛
+            ``NotImplementedError``（旧版会静默忽略，产出错误结果）。
     """
 
     def __init__(
@@ -99,7 +101,14 @@ class MinuteBacktester:
         else:
             self.execution = ExecutionEngine.from_config(config or {}, risk_manager)
             self.execution.intraday = True          # 分钟级强制日内涨跌停夹价
-        self.apply_corporate_actions = bool(apply_corporate_actions)
+        # 分钟级除权调整尚未实现：旧版把该参数存下却从不使用（静默无效），导致非复权数据
+        # 下持仓不做送转折算而无人察觉。改为传 True 即明确报错，引导改用 hfq 口径。
+        if apply_corporate_actions:
+            raise NotImplementedError(
+                "MinuteBacktester 暂不支持持仓除权调整（apply_corporate_actions=True）："
+                "分钟级请用 hfq 复权口径（送转/分红已折进价格，无需调整持仓）。"
+            )
+        self.apply_corporate_actions = False
 
         bt = _section(config, "backtest")
         rk = _section(config, "risk")
@@ -159,6 +168,9 @@ class MinuteBacktester:
         indexed = {code: df.set_index("datetime") for code, df in data.items()}
 
         pf = Portfolio(self.initial_capital, t1_cash_freeze=self.t1_cash_freeze)
+        # 风控初始化（仅在显式注入 risk_manager 时启用止损/熔断/仓位限制；与日级一致）
+        if self.risk_manager is not None and hasattr(self.risk_manager, "reset"):
+            self.risk_manager.reset(self.initial_capital)
         equity_ts: list[pd.Timestamp] = []
         equity_values: list[float] = []
         positions_log: list[dict[str, int]] = []
@@ -170,6 +182,9 @@ class MinuteBacktester:
             cur_day = ts.date()
             if cur_day != prev_day:
                 pf.settle_new_day()              # 跨交易日：解冻 T+1（每日仅一次）
+                # 风控：跨交易日刷新当日起点权益与历史峰值（单日止损 / 累计回撤熔断基准）
+                if self.risk_manager is not None and hasattr(self.risk_manager, "on_new_day"):
+                    self.risk_manager.on_new_day(pf)
                 prev_day = cur_day
 
             if prev_ts is not None:
@@ -271,6 +286,7 @@ class MinuteBacktester:
             row = signals.loc[signal_ts]
         except KeyError:
             return
+        rm = self.risk_manager
         sells = [c for c in signals.columns if int(row.get(c, 0)) == int(Signal.SELL) and pf.has_position(c)]
         buys = [c for c in signals.columns if int(row.get(c, 0)) == int(Signal.BUY)]
 
@@ -280,6 +296,9 @@ class MinuteBacktester:
                 continue
             pos = pf.get_position(code)
             order = Order(code=code, direction=int(Signal.SELL), shares=pos.shares, trade_date=exec_ts)
+            # 风控：累计回撤熔断时全面停盘（含卖出）；单日止损不拦截卖出（与日级一致）
+            if rm is not None and not rm.check_order(order, pf):
+                continue
             self.execution.match(order, bar, pf)
 
         for code in buys:
@@ -296,6 +315,13 @@ class MinuteBacktester:
             if shares < 100:
                 continue
             order = Order(code=code, direction=int(Signal.BUY), shares=shares, trade_date=exec_ts)
+            # 风控：熔断/单日止损拦截新开仓；并按单票(/行业)上限裁减股数（与日级一致）
+            if rm is not None:
+                if not rm.check_order(order, pf):
+                    continue
+                rm.clip_position_size(order, pf, price=float(base))
+                if order.shares < 100:
+                    continue
             self.execution.match(order, bar, pf)
 
     @staticmethod
