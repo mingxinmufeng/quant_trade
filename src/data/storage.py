@@ -54,6 +54,9 @@ DAILY_COLUMNS: dict[str, str] = {
     "is_suspended": "bool",
     "limit_up": "float64",
     "limit_down": "float64",
+    # name 为**当前证券简称**（便利元数据，非点位）：整列贴的是落盘时的当前名，**不可**用于
+    # 历史时点 ST 判定。点位曾用名请用 ProfileStore.name_at / Universe.name_at。涨跌停限幅
+    # （limit_up/down）已是点位 ST 口径，不依赖本列。
     "name": "string",
     "source": "string",  # 行级数据来源，便于溯源/回滚
 }

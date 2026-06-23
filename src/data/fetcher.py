@@ -932,6 +932,8 @@ class DataFetcher:
         df["limit_down"] = (prev_ref * (1.0 - limit_pct)).round(2)
 
         df["code"] = format_code(code)
+        # name 整列贴**当前名**（便利元数据，非点位）；点位 ST 已落进 limit_up/down，
+        # 历史时点曾用名请用 ProfileStore.name_at（勿用本列做点位 ST 判定）。
         df["name"] = stock_name
         df["source"] = source or "unknown"
         base_src = source or "unknown"
