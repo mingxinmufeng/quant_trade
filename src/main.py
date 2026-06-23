@@ -114,6 +114,35 @@ def _resolve_codes(cfg, codes: str | None, as_of: date, limit: int) -> list[str]
     return tradable[:limit]
 
 
+def _walk_forward_windows(days: list, folds: int) -> list[tuple]:
+    """把交易日序列切成 ``folds`` 个 (训练, 测试) 滚动窗口（防过拟合的样本外验证）。
+
+    方案：训练段**锚定起点、逐折扩张**（fold i 训练 [0, i)、测试紧邻的第 i 段）。
+    把日序均分为 ``folds+1`` 段：第 1..folds 段轮流作测试段，其之前的全部历史作训练段，
+    **训练段严格早于测试段**（无未来泄漏）。
+
+    Returns:
+        ``[(train_start, train_end, test_start, test_end), ...]``（元素为各窗口首尾交易日）。
+
+    Raises:
+        ValueError: ``folds < 1`` 或交易日不足以切分。
+    """
+    if folds < 1:
+        raise ValueError(f"folds 必须 >= 1，got {folds}")
+    n = len(days)
+    if n < (folds + 1) * 2:
+        raise ValueError(
+            f"交易日仅 {n} 天，不足以切 {folds} 折 walk-forward（需 ≥ {(folds + 1) * 2} 天）"
+        )
+    chunk = n // (folds + 1)
+    out: list[tuple] = []
+    for i in range(1, folds + 1):
+        train = days[: i * chunk]
+        test = days[i * chunk:] if i == folds else days[i * chunk: (i + 1) * chunk]
+        out.append((train[0], train[-1], test[0], test[-1]))
+    return out
+
+
 # ============================================================
 # 命令：数据更新
 # ============================================================
@@ -240,18 +269,26 @@ def optimize(
     end: str = typer.Option(..., "--end", help="结束日期"),
     codes: str | None = typer.Option(None, "--codes", help="空格/逗号分隔股票代码；缺省用 Universe"),
     limit: int = typer.Option(50, "--limit", help="缺省 codes 时 Universe 股票数上限"),
-    trials: int = typer.Option(30, "--trials", help="Optuna 试验次数"),
+    trials: int = typer.Option(30, "--trials", help="每折 Optuna 试验次数"),
+    folds: int = typer.Option(3, "--folds", help="walk-forward 滚动折数（训练段锚定起点扩张、测试段紧邻其后）；1=单次五五分样本内外"),
     metric: str = typer.Option("sharpe", "--metric", help="优化目标：sharpe/annual/calmar"),
     adjust: str = typer.Option("hfq", "--adjust"),
     config: str | None = typer.Option(None, "--config", help="配置文件路径"),
 ):
-    """用 Optuna 搜索策略 get_param_space 定义的超参，最大化指定指标。"""
+    """用 Optuna + **walk-forward 样本外验证**搜索策略超参。
+
+    每折在训练段（锚定起点、逐折扩张）上搜参，再用最优参在紧邻的测试段上验证；汇报各折
+    样本外(OOS)指标与均值。OOS 均值远低于训练值即为过拟合信号——它才是对未来表现的现实
+    预期，绝不要只看训练段最优值。注意：每个窗口内因子从头预热，窗口应远大于最长指标周期。
+    """
     import optuna
 
     from .engine import Backtester
     from .risk import RiskManager
     from .strategy import load_strategy
     from .utils.helpers import parse_date
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)  # 降噪：每折 trials 次回测
 
     cfg = _load_cfg(config)
     s, e = parse_date(start), parse_date(end)
@@ -264,24 +301,49 @@ def optimize(
     if not data:
         raise typer.Exit(code=1)
 
-    risk = RiskManager.from_config(cfg)
-    bt = Backtester(config=cfg, calendar=fetcher._calendar, risk_manager=risk)
-
     metric_attr = {"sharpe": "sharpe_ratio", "annual": "annual_return", "calmar": "calmar_ratio"}.get(metric)
     if metric_attr is None:
         raise typer.BadParameter("metric 须为 sharpe/annual/calmar")
 
-    def objective(trial: optuna.Trial) -> float:
-        params = strat_cls().get_param_space(trial)
-        res = bt.run(strat_cls(**params), s, e, data=data)
-        return float(getattr(res, metric_attr))
+    days = fetcher._calendar.get_trading_days(s, e)
+    try:
+        windows = _walk_forward_windows(days, folds)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
-    study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=trials)
+    risk = RiskManager.from_config(cfg)
+    bt = Backtester(config=cfg, calendar=fetcher._calendar, risk_manager=risk)
 
-    typer.echo("\n===== 调参结果 =====")
-    typer.echo(f"最优 {metric}={study.best_value:.4f}")
-    typer.echo(f"最优参数: {study.best_params}")
+    typer.echo(f"\n===== Walk-forward 调参（{folds} 折，样本外验证）=====")
+    oos_metrics: list[float] = []
+    for k, (tr_s, tr_e, te_s, te_e) in enumerate(windows, start=1):
+        # 默认参数绑定避免闭包晚绑定（study.optimize 在本折同步调用 objective）
+        def objective(trial: optuna.Trial, _ts=tr_s, _te=tr_e) -> float:
+            params = strat_cls().get_param_space(trial)
+            res = bt.run(strat_cls(**params), _ts, _te, data=data)
+            return float(getattr(res, metric_attr))
+
+        study = optuna.create_study(direction="maximize")
+        study.optimize(objective, n_trials=trials)
+        best = study.best_params
+        test_res = bt.run(strat_cls(**best), te_s, te_e, data=data)
+        test_metric = float(getattr(test_res, metric_attr))
+        oos_metrics.append(test_metric)
+        typer.echo(
+            f"[折{k}] 训练 {tr_s}~{tr_e}（{metric}={study.best_value:+.4f}）"
+            f" → 测试 {te_s}~{te_e}（{metric}={test_metric:+.4f}，交易 {test_res.total_trades} 笔）"
+        )
+        typer.echo(f"        最优参数: {best}")
+        if test_res.total_trades == 0:
+            typer.echo(
+                "        ⚠ 测试段 0 交易：窗口可能过短（装不下因子预热）或参数不触发信号，"
+                "该折 OOS 指标不可信——请增大数据区间/减少 --folds 或收窄参数周期。"
+            )
+
+    mean_oos = sum(oos_metrics) / len(oos_metrics) if oos_metrics else 0.0
+    typer.echo(f"\n样本外(OOS) {metric} 各折: {[round(m, 4) for m in oos_metrics]}")
+    typer.echo(f"样本外(OOS) {metric} 均值: {mean_oos:+.4f}  ← 对未来表现的现实预期")
+    typer.echo("（各折最优参数不同属正常；OOS 均值远低于训练值即为过拟合，勿只信训练段最优）")
 
 
 # ============================================================
