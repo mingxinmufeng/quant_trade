@@ -552,9 +552,11 @@ def calculate_max_drawdown(equity_curve: list[float]) -> float:
 
     equity_arr = np.array(equity_curve, dtype=np.float64)
     running_max = np.maximum.accumulate(equity_arr)
-    drawdown = (equity_arr - running_max) / running_max
+    # 守卫：峰值非正（净值含 0/负，如极端爆仓）时按位置回撤记 0，避免 inf/nan 静默传出
+    with np.errstate(divide="ignore", invalid="ignore"):
+        drawdown = np.where(running_max > 0, (equity_arr - running_max) / running_max, 0.0)
 
-    return float(np.min(drawdown))
+    return float(np.min(drawdown)) if drawdown.size else 0.0
 
 
 # ============================================================

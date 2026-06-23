@@ -90,11 +90,35 @@ class RiskManager:
         self.max_industry_position = float(max_industry_position)
         self.daily_stop_loss = float(daily_stop_loss)
         self.total_drawdown_stop = float(total_drawdown_stop)
+        self._validate()
 
         # 有状态字段
         self._peak_equity: float | None = None
         self._day_start_equity: float | None = None
         self._halted: bool = False   # 累计回撤熔断后置位
+
+    def _validate(self) -> None:
+        """构造期参数合法性校验（fail-fast，避免负费率 / 比例越界静默生效）。
+
+        - 费率类（佣金/印花）须在 ``[0, 1]``；最低佣金 ``>= 0``；
+        - 仓位上限与止损/熔断比例须在 ``[0, 1]``（``0`` 合法：如熔断线 0 = 立即停盘、
+          仓位上限 0 = 禁新开仓；``1`` 合法：如止损线 1 = 实质关闭单日止损）。
+        """
+        rates = {
+            "commission_rate": self.commission_rate,
+            "stamp_duty": self.stamp_duty,
+        }
+        ratios = {
+            "max_single_position": self.max_single_position,
+            "max_industry_position": self.max_industry_position,
+            "daily_stop_loss": self.daily_stop_loss,
+            "total_drawdown_stop": self.total_drawdown_stop,
+        }
+        for name, v in {**rates, **ratios}.items():
+            if not (0.0 <= v <= 1.0):
+                raise ValueError(f"RiskManager 参数 {name}={v} 越界，须在 [0, 1]")
+        if self.min_commission < 0:
+            raise ValueError(f"RiskManager 参数 min_commission={self.min_commission} 须 >= 0")
 
     @classmethod
     def from_config(cls, config: Any) -> RiskManager:
