@@ -253,6 +253,43 @@ def test_minute_resample():
 
 
 # ============================================================
+# 加载复权口径：gbbq 优先、外部兜底（P1-7）
+# ============================================================
+
+
+def test_load_factor_source_default_gbbq_preferred(tmp_path):
+    """P1-7：加载默认 gbbq 优先（_resolve_use_gbbq(None) → True）。"""
+    from src.data.fetcher import DataFetcher
+
+    f = DataFetcher(store_path=tmp_path, tdx_path="__nonexistent__", suspend_enabled=False)
+    assert f._load_factor_source == "gbbq"
+    assert f._resolve_use_gbbq(None) is True       # 缺省 → gbbq 优先
+    assert f._resolve_use_gbbq("active") is False   # 显式 active → 外部源
+
+
+def test_datastore_gbbq_preferred_with_external_fallback(tmp_path):
+    """use_gbbq=True：有 factors_gbbq/ 用 gbbq；该股无 gbbq 因子则回退 factors/。"""
+    from src.data import DataStore
+
+    store = DataStore(tmp_path)
+    raw_a = _raw_daily("000001.SZ", n=10)
+    store.write_raw("000001.SZ", "daily", raw_a)
+    ext = pd.DataFrame({"date": raw_a["date"], "cum_factor": [1.0] * 5 + [2.0] * 5})
+    gbb = pd.DataFrame({"date": raw_a["date"], "cum_factor": [1.0] * 5 + [3.0] * 5})
+    store.write_factor("000001.SZ", ext, gbbq=False)
+    store.write_factor("000001.SZ", gbb, gbbq=True)
+    hfq = store.load("000001.SZ", "daily", adjust="hfq", use_gbbq=True)
+    assert np.allclose(hfq["close"].to_numpy()[5:], raw_a["close"].to_numpy()[5:] * 3.0), "应优先用 gbbq 因子(×3)"
+
+    # 另一只只有外部因子、无 gbbq → 回退外部
+    raw_b = _raw_daily("600519.SH", n=10)
+    store.write_raw("600519.SH", "daily", raw_b)
+    store.write_factor("600519.SH", pd.DataFrame({"date": raw_b["date"], "cum_factor": [1.0] * 5 + [2.0] * 5}), gbbq=False)
+    hfq_b = store.load("600519.SH", "daily", adjust="hfq", use_gbbq=True)
+    assert np.allclose(hfq_b["close"].to_numpy()[5:], raw_b["close"].to_numpy()[5:] * 2.0), "无 gbbq 应回退外部因子(×2)"
+
+
+# ============================================================
 # _post_process_daily：零成交但有价 ≠ 停牌（P0-4）
 # ============================================================
 

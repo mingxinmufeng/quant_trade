@@ -15,6 +15,7 @@ data:
   store_path: "data_store"              # 本地数据存储根目录（parquet 文件）
   sources: ["pytdx", "akshare", "baostock", "tushare"]  # 数据源优先级；前者失败自动 fallback 到下一个
   factor_source: "sina"                 # 复权因子主源（固定单源，保证因子刻度一致）；可选 sina/tushare/em。不参与价格源 fallback
+  load_factor_source: "gbbq"            # 加载复权口径：gbbq=自算因子优先(全history覆盖,回测推荐) | active=仅用外部源 factors/
   # 重构后：原始价与因子分离落盘，复权在 load 时按需合成（adjust=none/hfq/qfq），不再需要因子自愈
   factor_selfheal_window: 30            # [已废弃] 保留仅为兼容旧脚本；新架构无自愈，本值被忽略
   # 停牌名单（按交易日整市场快照）：增量更新时权威判定停牌，替代"OHLCV 缺口反推"二义性

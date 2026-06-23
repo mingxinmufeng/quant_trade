@@ -181,7 +181,7 @@ class DataFetcher:
         factor_source: str = "sina",
         max_workers: int = DEFAULT_MAX_WORKERS,
         factor_skip_via_gbbq: bool = True,
-        load_factor_source: str = "active",
+        load_factor_source: str = "gbbq",
         suspend_sources: Sequence[str] = DEFAULT_SUSPEND_SOURCES,
         suspend_lookback_days: int = DEFAULT_SUSPEND_LOOKBACK_DAYS,
         suspend_enabled: bool = True,
@@ -223,8 +223,13 @@ class DataFetcher:
             else FactorProvider(source=self._factor_source, jitter=self._jitter)
         )
         self._factors = self._factor_engine  # 向后兼容别名
-        # 加载（复权）默认采用哪套因子：'active'=factors/（生效源），'gbbq'=factors_gbbq/
-        self._load_factor_source = (load_factor_source or "active").strip().lower()
+        # 加载（复权）默认采用哪套因子口径：
+        #   'gbbq'  = gbbq 自算因子优先、外部源(factors/)兜底（默认，回测推荐）；
+        #   'active'= 仅用生效外部源(factors/)。
+        # 默认 gbbq 优先：gbbq 自算因子以"行情最早一日=1.0"累乘、**全history 覆盖无早期缺口**，
+        # 避免外部源(sina/tushare)早期因子缺失导致的 align_cum_factor bfill 早段绝对价失真
+        # （P1-7）。换代码股 gbbq 按当前代码归并、记录完整（见 gbbq.events 实测注释），无副作用。
+        self._load_factor_source = (load_factor_source or "gbbq").strip().lower()
         # 停牌名单 provider（东财主源 + tushare 兜底，按交易日落盘缓存）：
         # 增量更新时权威判定停牌，替代"OHLCV 缺口反推"的二义性
         self._suspend = SuspendProvider(

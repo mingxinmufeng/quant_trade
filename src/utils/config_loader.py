@@ -69,6 +69,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "store_path": "data_store",
         "sources": ["pytdx", "akshare", "baostock", "tushare"],
         "factor_source": "sina",
+        "load_factor_source": "gbbq",   # 加载复权口径：gbbq=自算优先(全覆盖,回测推荐) | active=仅外部源
         "factor_selfheal_window": 30,
         "suspend_sources": ["eastmoney", "tushare"],
         "suspend_lookback_days": 30,

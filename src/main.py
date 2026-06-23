@@ -61,6 +61,7 @@ def _build_fetcher(cfg):
         retry_delays=tuple(d.get("retry_delays", (1, 2, 4, 8))),
         tdx_path=d.get("tdx_path", "") or None,
         factor_source=d.get("factor_source", "sina"),
+        load_factor_source=d.get("load_factor_source", "gbbq"),
         max_workers=d.get("max_workers", 4),
         suspend_sources=tuple(d.get("suspend_sources", ("eastmoney", "tushare"))),
         suspend_lookback_days=d.get("suspend_lookback_days", 30),
