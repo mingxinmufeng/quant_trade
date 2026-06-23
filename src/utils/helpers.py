@@ -524,11 +524,13 @@ def calculate_sharpe(
     mean_excess = np.mean(excess_returns)
     std_excess = np.std(excess_returns, ddof=1)  # 样本标准差
 
-    if std_excess == 0:
+    # 用容差而非精确 ==0：近似常数收益（如空仓/无成交的几乎持平净值）std 仅有浮点微噪声，
+    # 精确判等挡不住，会把 (≈非零均值)/(≈1e-18) 除成天文数字（实测污染调参目标）。
+    if not np.isfinite(std_excess) or std_excess < 1e-12:
         return 0.0
 
-    sharpe_daily = mean_excess / std_excess
-    return float(sharpe_daily * (trading_days ** 0.5))
+    sharpe = float(mean_excess / std_excess * (trading_days ** 0.5))
+    return sharpe if np.isfinite(sharpe) else 0.0
 
 
 def calculate_max_drawdown(equity_curve: list[float]) -> float:

@@ -26,3 +26,21 @@ def test_max_drawdown_short_input():
 
     assert calculate_max_drawdown([]) == 0.0
     assert calculate_max_drawdown([1.0]) == 0.0
+
+
+def test_sharpe_near_constant_returns_safe():
+    """P2-14：近似常数收益（浮点微噪声）不应除出天文数字（旧 std==0 精确判等会漏，污染调参）。"""
+    from src.utils.helpers import calculate_sharpe
+
+    assert calculate_sharpe([0.0] * 50) == 0.0                      # 完全常数 → 0
+    noisy = [1e-18 * ((-1) ** i) for i in range(50)]                # 1e-18 级微噪声
+    s = calculate_sharpe(noisy)
+    assert np.isfinite(s) and abs(s) < 1.0                          # 有限、不爆炸
+    assert calculate_sharpe([0.01, -0.005, 0.02, -0.01, 0.015]) != 0.0  # 正常波动仍正常
+
+
+def test_sharpe_short_input():
+    from src.utils.helpers import calculate_sharpe
+
+    assert calculate_sharpe([]) == 0.0
+    assert calculate_sharpe([0.01]) == 0.0
