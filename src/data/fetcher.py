@@ -899,14 +899,20 @@ class DataFetcher:
 
         susp_col = df.pop("_suspended") if "_suspended" in df.columns else None
 
-        missing = df["close"].isna() | (df["volume"].fillna(0) <= 0)
-        is_suspended = missing.copy()
+        # 区分两类"非常规"行：
+        # - no_data：close 为 NaN（reindex 空行 / 源无此日）→ 真缺口，一律视为停牌占位；
+        # - zero_vol_priced：有 close 但零成交 → **歧义**（可能是真停牌的前收占位，也可能是
+        #   北交所/低流动性股的真实零成交交易日）。绝不单凭零成交就判停牌抹价，交由**权威停牌
+        #   名单**裁定：仅名单确认时才算停牌；否则保留为真实（低流动性）交易日，OHLCV 不被抹除。
+        no_data = df["close"].isna()
+        zero_vol_priced = (df["volume"].fillna(0) <= 0) & ~no_data
+        confirmed = self._confirmed_suspended_mask(code, df["date"], no_data | zero_vol_priced)
+
+        is_suspended = no_data.copy()
         if susp_col is not None:
             is_suspended = is_suspended | susp_col.fillna(False).astype(bool)
+        is_suspended = is_suspended | (zero_vol_priced & confirmed)
         df["is_suspended"] = is_suspended.astype(bool)
-
-        # 权威停牌确认（按交易日整市场名单）：仅对缺口行判定，区分 :suspend / :gap
-        confirmed = self._confirmed_suspended_mask(code, df["date"], missing)
 
         # 涨跌停：用不复权前收反推（原始价口径）。限幅按**逐行点位 ST** 判定——
         # 主板历史 ST 时段 ±5% / 非 ST ±10%（ST 状态随时间变化），创业板/科创板
@@ -924,8 +930,10 @@ class DataFetcher:
         df["name"] = stock_name
         df["source"] = source or "unknown"
         base_src = source or "unknown"
-        df.loc[missing & confirmed, "source"] = f"{base_src}:suspend"
-        df.loc[missing & ~confirmed, "source"] = f"{base_src}:gap"
+        # 来源标签 / 尾部裁剪只针对**真缺口**（no_data）行：有价零成交是真实数据，
+        # 既不打 :gap（否则会被 _trim_unconfirmed_trailing 误裁）也不打 :suspend。
+        df.loc[no_data & confirmed, "source"] = f"{base_src}:suspend"
+        df.loc[no_data & ~confirmed, "source"] = f"{base_src}:gap"
 
         for col in DAILY_COLUMNS:
             if col not in df.columns:

@@ -253,8 +253,40 @@ def test_minute_resample():
 
 
 # ============================================================
-# _should_skip_factor：因子刷新增量触发器（按因子源口径分流）
+# _post_process_daily：零成交但有价 ≠ 停牌（P0-4）
 # ============================================================
+
+
+def test_post_process_zero_volume_priced_not_suspended(tmp_path):
+    """P0-4：有 close 但零成交（北交所/低流动性真实交易日）不应被判停牌、价不被抹。
+
+    停牌名单关闭时，零成交但有价的行交由名单裁定 → 未确认 → is_suspended=False、
+    close 保留、来源不打 :gap（旧逻辑会因 volume<=0 直接判停牌并标 :gap）。
+    """
+    from src.data.fetcher import DataFetcher
+    from src.data.trading_calendar import TradingCalendar
+
+    days = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"])
+    cal = TradingCalendar(store_path=tmp_path, auto_load=False)
+    cal._trading_days = pd.DatetimeIndex(days)
+
+    f = DataFetcher(store_path=tmp_path, tdx_path="__nonexistent__",
+                    suspend_enabled=False, calendar=cal)
+    DataFetcher._STOCK_NAME_CACHE["830799.BJ"] = "艾融软件"  # 避免触发网络名称表
+
+    raw = pd.DataFrame({
+        "date": days,
+        "open": [10.0, 10.1, 10.2], "high": [10.0, 10.1, 10.2],
+        "low": [10.0, 10.1, 10.2], "close": [10.0, 10.1, 10.2],
+        "volume": [1e5, 0.0, 1e5],          # 第 2 日零成交但有价
+        "amount": [1e6, 0.0, 1e6], "raw_close": [10.0, 10.1, 10.2],
+    })
+    out = f._post_process_daily("830799.BJ", raw, days[0].date(), days[-1].date(), source="test")
+    out = out.sort_values("date").reset_index(drop=True)
+
+    assert bool(out.loc[1, "is_suspended"]) is False, "零成交但有价不应被判停牌"
+    assert np.isclose(out.loc[1, "close"], 10.1), "零成交真实交易日的价格不应被抹"
+    assert not str(out.loc[1, "source"]).endswith(":gap"), "真实数据行不应被标 :gap（否则会被尾部裁剪）"
 
 
 def test_should_skip_factor_external_uses_raw_advance(tmp_path):
