@@ -258,12 +258,13 @@ def _coerce_env_value(raw: str) -> Any:
         return False
     if lowered in ("null", "none", "~", ""):
         return None
-    # 整数
-    try:
-        if s.lstrip("+-").isdigit():
-            return int(s)
-    except ValueError:
-        pass
+    # 整数（保留前导零的纯数字串为字符串：股票代码/版本号/邮编等标识符，如 "000001"，
+    # 否则 int("000001")=1 会丢前导零，A 股代码场景直接出错）
+    digits = s.lstrip("+-")
+    if digits.isdigit():
+        if len(digits) > 1 and digits[0] == "0":
+            return s
+        return int(s)
     # 浮点
     try:
         if any(ch in s for ch in (".", "e", "E")):
