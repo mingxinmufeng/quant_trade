@@ -114,7 +114,7 @@ def _offline_fetcher(tmp_path, code, current_name, profile_rows=None):
     f = DataFetcher(
         store_path=tmp_path, tdx_path="__nonexistent__", suspend_enabled=False,
     )
-    DataFetcher._STOCK_NAME_CACHE[code] = current_name  # 预置避免触发网络名称表
+    f._stock_name_cache[code] = current_name  # 预置避免触发网络名称表
     if profile_rows is not None:
         df = pd.DataFrame(profile_rows, columns=["code", "name", "change_date"])
         df["change_date"] = pd.to_datetime(df["change_date"])
@@ -222,7 +222,7 @@ def test_name_table_prefers_local_tushare(tmp_path):
     }).to_parquet(tmp_path / STOCK_BASIC_TUSHARE_FILE, index=False)
 
     f = DataFetcher(store_path=tmp_path, tdx_path="__nonexistent__", suspend_enabled=False)
-    DataFetcher._STOCK_NAME_CACHE.clear()  # 强制从本地源重建
+    f._stock_name_cache.clear()  # 实例缓存（新实例本就空，此处仅保持显式意图）
     assert f._load_names_from_local() is True
     assert f._get_stock_name("600000.SH") == "浦发银行"
     assert f._get_stock_name("000004.SZ") == "*ST国华"
@@ -233,8 +233,25 @@ def test_name_table_local_missing_falls_back(tmp_path):
     from src.data.fetcher import DataFetcher
 
     f = DataFetcher(store_path=tmp_path, tdx_path="__nonexistent__", suspend_enabled=False)
-    DataFetcher._STOCK_NAME_CACHE.clear()
+    f._stock_name_cache.clear()
     assert f._load_names_from_local() is False
+
+
+def test_name_cache_isolated_per_store(tmp_path):
+    """P2-4：不同 store_path 的两个 fetcher 名称缓存相互隔离（不再进程级 ClassVar 串扰）。"""
+    from src.data.fetcher import STOCK_BASIC_TUSHARE_FILE, DataFetcher
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    pd.DataFrame({"ts_code": ["600000.SH"], "name": ["浦发银行"]}).to_parquet(
+        tmp_path / "a" / STOCK_BASIC_TUSHARE_FILE, index=False)
+    pd.DataFrame({"ts_code": ["600000.SH"], "name": ["ST浦发"]}).to_parquet(
+        tmp_path / "b" / STOCK_BASIC_TUSHARE_FILE, index=False)
+
+    fa = DataFetcher(store_path=tmp_path / "a", tdx_path="__nonexistent__", suspend_enabled=False)
+    fb = DataFetcher(store_path=tmp_path / "b", tdx_path="__nonexistent__", suspend_enabled=False)
+    assert fa._get_stock_name("600000.SH") == "浦发银行"
+    assert fb._get_stock_name("600000.SH") == "ST浦发"   # 不被 a 实例的缓存串扰
 
 
 def test_minute_resample():
@@ -309,7 +326,7 @@ def test_post_process_zero_volume_priced_not_suspended(tmp_path):
 
     f = DataFetcher(store_path=tmp_path, tdx_path="__nonexistent__",
                     suspend_enabled=False, calendar=cal)
-    DataFetcher._STOCK_NAME_CACHE["830799.BJ"] = "艾融软件"  # 避免触发网络名称表
+    f._stock_name_cache["830799.BJ"] = "艾融软件"  # 避免触发网络名称表
 
     raw = pd.DataFrame({
         "date": days,

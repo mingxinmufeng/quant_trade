@@ -38,7 +38,6 @@ from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
-from typing import ClassVar
 
 import numpy as np
 import pandas as pd
@@ -165,10 +164,6 @@ def _backfill_limit_df(
 class DataFetcher:
     """多源容灾 + 多周期 + 增量更新 + 原始/因子分离落盘的行情拉取器。"""
 
-    _STOCK_NAME_CACHE: ClassVar[dict[str, str]] = {}
-    #: 全市场「代码→退市日」表（仅退市股；增量更新据此把 end 截到退市日并禁联网）
-    _DELIST_DATE_CACHE: ClassVar[dict[str, date]] = {}
-
     def __init__(
         self,
         store_path: str | Path = "data_store",
@@ -238,6 +233,11 @@ class DataFetcher:
             lookback_days=suspend_lookback_days,
             enabled=suspend_enabled,
         )
+        # 全市场「代码→当前简称」/「代码→退市日」缓存：**实例级**（按 store_path 隔离）。
+        # 早期为 ClassVar(进程级共享)，但其内容依赖 store_path 下的本地基础信息文件，跨不同
+        # store 的实例共享会串扰（A 实例读到 B 实例 store 的名称/退市表），故改为实例属性。
+        self._stock_name_cache: dict[str, str] = {}
+        self._delist_date_cache: dict[str, date] = {}
         # 多线程：保护源懒构建与股票名称表的并发初始化
         self._source_lock = threading.Lock()
         self._name_lock = threading.Lock()
@@ -601,7 +601,7 @@ class DataFetcher:
     def list_market_codes(self, include_bse: bool = True) -> list[str]:
         """返回全市场 A 股代码清单（akshare ``stock_info_a_code_name``，独立于本地包）。"""
         self._ensure_stock_name_table()
-        codes = list(self._STOCK_NAME_CACHE.keys())
+        codes = list(self._stock_name_cache.keys())
         if not include_bse:
             codes = [c for c in codes if not c.endswith(".BJ")]
         return sorted(set(codes))
@@ -1052,10 +1052,10 @@ class DataFetcher:
         含在市+退市当前名，离线）；缺失/读取失败才**降级**到东财（akshare
         ``stock_info_a_code_name``，实时联网，偶发连接重置不稳定）。
         """
-        if self._STOCK_NAME_CACHE:
+        if self._stock_name_cache:
             return
         with self._name_lock:
-            if self._STOCK_NAME_CACHE:  # 等锁期间已被别的线程填充
+            if self._stock_name_cache:  # 等锁期间已被别的线程填充
                 return
             if self._load_names_from_local():
                 return
@@ -1074,15 +1074,15 @@ class DataFetcher:
             return False
         if df is None or df.empty:
             return False
-        self._STOCK_NAME_CACHE.update({
+        self._stock_name_cache.update({
             format_code(str(c)): str(n)
             for c, n in zip(df["ts_code"].tolist(), df["name"].tolist(), strict=True)
             if pd.notna(c) and pd.notna(n) and str(n).strip()
         })
-        if not self._STOCK_NAME_CACHE:
+        if not self._stock_name_cache:
             return False
         logger.debug(
-            f"股票名称表已从本地基础信息加载: {len(self._STOCK_NAME_CACHE)} 只 | {path}"
+            f"股票名称表已从本地基础信息加载: {len(self._stock_name_cache)} 只 | {path}"
         )
         return True
 
@@ -1093,7 +1093,7 @@ class DataFetcher:
             df = _ak_call(ak.stock_info_a_code_name)
             if df is not None and not df.empty:
                 # 向量化构建，比 iterrows() 快 10x+
-                self._STOCK_NAME_CACHE.update({
+                self._stock_name_cache.update({
                     format_code(str(c)): str(n)
                     for c, n in zip(df["code"].tolist(), df["name"].tolist(), strict=True)
                 })
@@ -1104,10 +1104,10 @@ class DataFetcher:
 
     def _get_stock_name(self, code: str) -> str:
         std = format_code(code)
-        if std in self._STOCK_NAME_CACHE:
-            return self._STOCK_NAME_CACHE[std]
+        if std in self._stock_name_cache:
+            return self._stock_name_cache[std]
         self._ensure_stock_name_table()
-        return self._STOCK_NAME_CACHE.get(std, "")
+        return self._stock_name_cache.get(std, "")
 
     def _ensure_delist_table(self) -> None:
         """构建全市场「代码→退市日」表（仅退市股，来自本地 tushare 基础信息）。
@@ -1118,10 +1118,10 @@ class DataFetcher:
 
         本地基础信息缺失/无 ``delist_date`` 列时留空（不截断，行为同旧版）。
         """
-        if self._DELIST_DATE_CACHE:
+        if self._delist_date_cache:
             return
         with self._delist_lock:
-            if self._DELIST_DATE_CACHE:  # 等锁期间已被别的线程填充
+            if self._delist_date_cache:  # 等锁期间已被别的线程填充
                 return
             path = self._store_path / STOCK_BASIC_TUSHARE_FILE
             if not path.exists():
@@ -1144,13 +1144,13 @@ class DataFetcher:
             for code, raw in zip(d["ts_code"].tolist(), d["delist_date"].tolist(), strict=True):
                 dt = pd.to_datetime(str(raw), format="%Y%m%d", errors="coerce")
                 if pd.notna(dt):
-                    self._DELIST_DATE_CACHE[format_code(str(code))] = dt.date()
-            logger.debug(f"退市日表已加载: {len(self._DELIST_DATE_CACHE)} 只退市股 | {path}")
+                    self._delist_date_cache[format_code(str(code))] = dt.date()
+            logger.debug(f"退市日表已加载: {len(self._delist_date_cache)} 只退市股 | {path}")
 
     def _delist_date(self, code: str) -> date | None:
         """该股票的退市日（已退市且有 delist_date 时返回，否则 None）。"""
         self._ensure_delist_table()
-        return self._DELIST_DATE_CACHE.get(format_code(code))
+        return self._delist_date_cache.get(format_code(code))
 
     def __repr__(self) -> str:
         return (

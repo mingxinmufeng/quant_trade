@@ -234,7 +234,7 @@ def _fetcher_with_calendar(tmp_path, trading_days, suspend_stub):
     cal._trading_days = pd.DatetimeIndex(pd.to_datetime(trading_days))
     f = DataFetcher(store_path=tmp_path, calendar=cal, suspend_enabled=False)
     f._suspend = suspend_stub
-    DataFetcher._STOCK_NAME_CACHE["000001.SZ"] = "平安银行"
+    f._stock_name_cache["000001.SZ"] = "平安银行"
     return f
 
 
