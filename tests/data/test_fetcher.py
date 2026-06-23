@@ -87,6 +87,22 @@ def test_resample_daily_weekly():
     assert wk["high"].iloc[0] <= df["high"].max() + 1e-9
 
 
+def test_resample_weekly_bar_date_is_real_trading_day():
+    """P2-7：周线 bar 日期取 bin 内真实最后交易日，而非 W-FRI 的周五标签（可能落非交易日）。"""
+    from src.data import resample_daily
+
+    # 某周只有周一~周四有数据（周五缺，模拟节假日）
+    dates = pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"])
+    df = pd.DataFrame({
+        "date": dates, "open": 1.0, "high": 2.0, "low": 0.5,
+        "close": [1.0, 2.0, 3.0, 4.0], "volume": 100.0, "amount": 150.0,
+    })
+    wk = resample_daily(df, "weekly")
+    assert len(wk) == 1
+    assert wk["date"].iloc[0] == pd.Timestamp("2024-01-04")   # 周四（真实末日），非周五标签
+    assert wk["close"].iloc[0] == 4.0                          # 周内最后收盘
+
+
 def test_backfill_limit_df():
     from src.data.fetcher import _backfill_limit_df
 

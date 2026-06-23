@@ -31,7 +31,8 @@ def resample_daily(df: pd.DataFrame, period: str) -> pd.DataFrame:
         raise ValueError(f"不支持的日线周期: {period}（支持 {list(DAILY_RESAMPLE_RULES)}）")
     if df.empty:
         return df
-    g = df.set_index("date").resample(rule)
+    s = df.set_index("date")
+    g = s.resample(rule)
     cols = {
         "open": g["open"].first(),
         "high": g["high"].max(),
@@ -42,8 +43,12 @@ def resample_daily(df: pd.DataFrame, period: str) -> pd.DataFrame:
     }
     if "adj_factor" in df.columns:
         cols["adj_factor"] = g["adj_factor"].last()
-    out = pd.DataFrame(cols).dropna(subset=["close"]).reset_index()
-    if "code" in df.columns and not df.empty:
+    out = pd.DataFrame(cols)
+    # bar 日期用每个 bin 内**真实最后交易日**，而非 resample 的周期末标签（W-FRI 的周五、
+    # ME 的月末日）——含节假日的周/月其末标签会落在非交易日，造成 bar 时间戳不是真实交易日。
+    out["date"] = s.index.to_series().resample(rule).max()
+    out = out.dropna(subset=["close"]).reset_index(drop=True)
+    if "code" in df.columns:
         out["code"] = df["code"].iloc[0]
     return out
 
