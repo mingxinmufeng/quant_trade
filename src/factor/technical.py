@@ -89,11 +89,25 @@ class TechnicalFactor(FactorBase):
 
     def compute(self, data: pd.DataFrame) -> pd.Series:
         self.validate_input(data, self.required_columns)
+        # 保证按交易日升序：_to_series/_as_dated_series 用**按位置**对齐，若 data 行序乱了，
+        # 指标会算在乱序上、再贴回乱序索引（结果错）。多数上游已有序，仅在非单调时排序。
+        data = self._ensure_time_sorted(data)
         result = self._calc(data)
         ser = self._to_series(result, data)
         ser.name = self.factor_name
         # 交易日索引对齐统一交给基类 _as_dated_series（结果恒与 data 等长，走按位置对齐）
         return self._as_dated_series(ser, data)
+
+    @staticmethod
+    def _ensure_time_sorted(data: pd.DataFrame) -> pd.DataFrame:
+        """若 data 未按时间升序则排序（``date`` 列优先，否则 DatetimeIndex）；已有序原样返回。"""
+        if "date" in data.columns:
+            s = pd.to_datetime(data["date"], errors="coerce")
+            if not s.is_monotonic_increasing:
+                return data.assign(**{"date": s}).sort_values("date").reset_index(drop=True)
+        elif isinstance(data.index, pd.DatetimeIndex) and not data.index.is_monotonic_increasing:
+            return data.sort_index()
+        return data
 
     def _calc(self, data: pd.DataFrame):
         """子类实现：返回指标值（Series / ndarray / None）。"""

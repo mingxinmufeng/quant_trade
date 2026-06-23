@@ -138,11 +138,13 @@ def _load_module_from_path(name: str, external_path: str):
         raise StrategyLoadError(f"无法为 {file_path} 创建模块 spec")
     module = importlib.util.module_from_spec(spec)
 
-    # 临时把策略目录加入 sys.path，支持私有策略 import 同目录的兄弟模块
+    # 临时把策略目录加入 sys.path，支持私有策略 import 同目录的兄弟模块。
+    # 用 append 而非 insert(0)：插到队首会让策略目录里与标准库/本项目同名的模块（如恶意
+    # 的 os.py）在 exec 期间被优先导入而劫持；append 仅作兜底解析，不抢占既有优先级。
     added = False
     search_str = str(search_dir)
     if search_str not in sys.path:
-        sys.path.insert(0, search_str)
+        sys.path.append(search_str)
         added = True
     sys.modules[mod_name] = module  # 注册，便于 dataclass / pickling
     try:
