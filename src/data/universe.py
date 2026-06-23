@@ -639,16 +639,16 @@ class Universe:
 
     @staticmethod
     def _norm_index_code(index_code: str) -> str:
-        """指数代码归一为 ``XXXXXX.SH/SZ`` 风格（用于目录名）。"""
+        """指数代码归一为**纯 6 位数字**（作快照目录键）。
+
+        消除"带/不带后缀"导致同一指数目录分裂：``000300`` / ``000300.SH`` / ``000300.SZ``
+        / ``sh000300`` 全部落到同一目录 ``000300``。csindex 拉取本就只用数字部分（见
+        :meth:`_fetch_index_weight_remote` 的 ``bare``），目录键用数字即可。非 6 位数字
+        （罕见/异常输入）原样返回，不强行编造后缀。
+        """
         s = str(index_code).strip().upper()
-        if s.endswith(".SH") or s.endswith(".SZ") or s.endswith(".BJ"):
-            return s
         digits = "".join(ch for ch in s if ch.isdigit())
-        if not digits:
-            return s
-        # 沪市指数多以 000/950 开头；深市以 399 开头
-        suffix = "SZ" if digits.startswith("399") else "SH"
-        return f"{digits}.{suffix}"
+        return digits if len(digits) == 6 else s
 
     @staticmethod
     def _list_snapshots(snap_dir: Path) -> list[tuple]:

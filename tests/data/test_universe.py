@@ -7,6 +7,14 @@ from src.data.profile import ProfileStore
 from src.data.universe import Universe
 
 
+def test_norm_index_code_unifies_suffix_forms():
+    """P2-18：同一指数的带/不带后缀形式归一到同一纯数字目录键，避免快照目录分裂。"""
+    n = Universe._norm_index_code
+    assert n("000300") == n("000300.SH") == n("000300.SZ") == n("sh000300") == "000300"
+    assert n("399006") == "399006"
+    assert n("000905.SH") == "000905"
+
+
 def _inject_profile(uni: Universe, rows) -> None:
     """给 Universe 注入一个离线 ProfileStore（rows: [(code, name, change_date)]）。"""
     df = pd.DataFrame(rows, columns=["code", "name", "change_date"])
