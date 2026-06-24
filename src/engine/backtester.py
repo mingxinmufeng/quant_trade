@@ -15,7 +15,8 @@ T+1 滞后，杜绝未来函数。
 ------------------
 默认在 **hfq（后复权）** 价上回测：复权价已把送转/分红连续地折进价格，**无需**再对持仓
 股数/现金做除权调整（否则双重计提）。因此引擎默认 ``apply_corporate_actions=False``。
-仅当显式传入**不复权/前复权**数据时才应开启（用 :meth:`ExecutionEngine.apply_corporate_action`）。
+仅当显式传入**不复权(none)**数据时才应开启（用 :meth:`ExecutionEngine.apply_corporate_action`）；
+``qfq`` 同样已折除权、**不可**开启，否则双重计提。
 
 仓位规则（示例引擎的默认实现）
 ------------------------------
@@ -120,7 +121,7 @@ class Backtester:
         fetcher: 数据源（需有 ``load_batch``）；当 :meth:`run` 未直接传 data 时使用。
         risk_manager: 风控（传给撮合引擎计算费用；可选）。
         position_size: 单票目标权重；None 时取 ``risk.max_single_position`` 或 0.2。
-        apply_corporate_actions: 是否对持仓做除权调整（仅非复权/前复权数据下开启）。
+        apply_corporate_actions: 是否对持仓做除权调整（仅不复权 none 数据下开启；hfq/qfq 已折除权，开启会双重计提）。
     """
 
     def __init__(
