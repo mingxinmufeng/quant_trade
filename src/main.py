@@ -34,11 +34,15 @@ app = typer.Typer(
 # ============================================================
 
 
-def _load_cfg(config: str | None):
-    from .utils.config_loader import load_config
+def _load_cfg(config: str | None, store_path: str | None = None):
+    from .utils.config_loader import apply_overrides, load_config
     from .utils.helpers import init_logging
 
     cfg = load_config(config_path=config)
+    # --store-path 是最高优先级覆盖（高于环境变量 / config.private.yaml / config.yaml），
+    # 供一次性指定本机数据仓库位置；缺省则按配置链解析。
+    if store_path:
+        cfg = apply_overrides(cfg, {"data.store_path": store_path})
     lg = cfg.get("logging", {}) if hasattr(cfg, "get") else {}
     init_logging(
         log_dir=lg.get("log_dir", "logs"),
@@ -155,6 +159,7 @@ def fetch(
     no_bse: bool = typer.Option(False, "--no-bse", help="全市场清单剔除北交所"),
     throttle: float = typer.Option(0.3, "--throttle", help="每只股票处理完 sleep 秒数（防网络源风控；纯 pytdx 本地源可设 0）"),
     config: str | None = typer.Option(None, "--config", help="配置文件路径"),
+    store_path: str | None = typer.Option(None, "--store-path", help="数据仓库根目录（最高优先级覆盖 config/环境变量；缺省按配置链解析）"),
 ):
     """增量更新本地原始行情 + 刷新复权因子（亦即 README 中的 fetch 命令）。
 
@@ -163,7 +168,7 @@ def fetch(
     """
     import re
 
-    cfg = _load_cfg(config)
+    cfg = _load_cfg(config, store_path)
     fetcher = _build_fetcher(cfg)
     freq_list = tuple(f for f in re.split(r"[\s,;]+", freqs.strip()) if f)
 
@@ -201,6 +206,7 @@ def backtest(
     position_size: float | None = typer.Option(None, "--position-size", help="单票目标权重；缺省取 risk.max_single_position"),
     output: str | None = typer.Option(None, "--output", help="将净值曲线写出到该 CSV"),
     config: str | None = typer.Option(None, "--config", help="配置文件路径"),
+    store_path: str | None = typer.Option(None, "--store-path", help="数据仓库根目录（最高优先级覆盖 config/环境变量；缺省按配置链解析）"),
 ):
     """运行回测并打印绩效摘要。"""
     from .engine import Backtester
@@ -208,7 +214,7 @@ def backtest(
     from .strategy import load_strategy
     from .utils.helpers import parse_date
 
-    cfg = _load_cfg(config)
+    cfg = _load_cfg(config, store_path)
     s, e = parse_date(start), parse_date(end)
 
     # 策略类（外部优先，回退内置示例）；external_path 缺省取 config.strategy.external_path
@@ -274,6 +280,7 @@ def optimize(
     metric: str = typer.Option("sharpe", "--metric", help="优化目标：sharpe/annual/calmar"),
     adjust: str = typer.Option("hfq", "--adjust"),
     config: str | None = typer.Option(None, "--config", help="配置文件路径"),
+    store_path: str | None = typer.Option(None, "--store-path", help="数据仓库根目录（最高优先级覆盖 config/环境变量；缺省按配置链解析）"),
 ):
     """用 Optuna + **walk-forward 样本外验证**搜索策略超参。
 
@@ -290,7 +297,7 @@ def optimize(
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)  # 降噪：每折 trials 次回测
 
-    cfg = _load_cfg(config)
+    cfg = _load_cfg(config, store_path)
     s, e = parse_date(start), parse_date(end)
     ext = strategy_path or (cfg.get("strategy", {}).get("external_path") or None)
     strat_cls = load_strategy(strategy, external_path=ext)
@@ -355,9 +362,10 @@ def optimize(
 def calendar(
     date_str: str = typer.Option(..., "--date", help="查询日期 YYYY-MM-DD"),
     config: str | None = typer.Option(None, "--config", help="配置文件路径"),
+    store_path: str | None = typer.Option(None, "--store-path", help="数据仓库根目录（最高优先级覆盖 config/环境变量；缺省按配置链解析）"),
 ):
     """查询某日是否交易日及相邻交易日。"""
-    cfg = _load_cfg(config)
+    cfg = _load_cfg(config, store_path)
     from .data import TradingCalendar
     from .utils.helpers import parse_date
 

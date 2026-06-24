@@ -12,7 +12,9 @@
 # 数据层（src/data/）
 # ------------------------------------------------------------
 data:
-  store_path: "data_store"              # 本地数据存储根目录（parquet 文件）
+  store_path: "data_store"              # 数据仓库根目录（parquet）。**每台机器自选**：勿改本行，改用
+                                        # --store-path / QUANT_DATA__STORE_PATH / config.private.yaml 覆盖（见 config.private.yaml.example）。
+                                        # 缺省 "data_store" 相对运行目录；建议设绝对路径(SSD、非云同步盘)。
   sources: ["pytdx", "akshare", "baostock", "tushare"]  # 数据源优先级；前者失败自动 fallback 到下一个
   factor_source: "sina"                 # 复权因子主源（固定单源，保证因子刻度一致）；可选 sina/tushare/em。不参与价格源 fallback
   load_factor_source: "gbbq"            # 加载复权口径：gbbq=自算因子优先(全history覆盖,回测推荐) | active=仅用外部源 factors/

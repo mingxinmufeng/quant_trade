@@ -1,0 +1,21 @@
+# config.private.yaml.example —— 每台机器的私有覆盖模板
+# ============================================================
+# 用法：复制本文件为 config.private.yaml（同目录），按需修改。
+#   config.private.yaml 已被 .gitignore 忽略，**不会进版本库**，故可放本机专属路径/口径，
+#   不污染共享代码、保证跨机器可复现（代码本身永远不含机器专属路径）。
+#
+# 数据仓库位置（store_path）的优先级（高 > 低，后者被前者覆盖）：
+#   --store-path（CLI）  >  QUANT_DATA__STORE_PATH（环境变量）  >  config.private.yaml
+#   >  config.yaml  >  内置默认 "data_store"（相对运行目录）
+#
+# 只需写你要覆盖的字段，其余沿用 config.yaml。
+
+data:
+  # 本机数据仓库根目录。建议放 **SSD**、**勿放云同步盘**（OneDrive/坚果云等会反复扫描
+  # 几十万 parquet 小文件、拖慢并可能损坏）。缺省 "data_store"（相对当前运行目录）。
+  # Windows 示例（正反斜杠均可，建议正斜杠）：
+  store_path: "C:/QuantData/data_store"
+  # Linux/Mac 示例：
+  # store_path: "/data/quant/data_store"
+
+# 提示：TUSHARE_TOKEN 等凭证建议放 .env（TUSHARE_TOKEN=xxxx），而非此处。

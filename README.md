@@ -103,6 +103,12 @@ stocks = universe.get_tradable_stocks("2024-01-01")
 - 周/月/季/年线由**日线** resample；
 - 15/30/60 分钟由 **5 分钟**生成；其它分钟周期由 **1 分钟**生成。
 
+> **数据仓库位置（每台机器自选，保证可移植/可复现）**：代码本身**不含机器专属路径**。
+> `store_path` 缺省 `data_store`（相对运行目录），每台机器按需覆盖，优先级高→低：
+> `--store-path`（CLI 一次性）> `QUANT_DATA__STORE_PATH`（环境变量）> `config.private.yaml`（本机，已 gitignore）> `config.yaml` > 内置默认。
+> 推荐设**绝对路径**且放 **SSD、非云同步盘**；模板见 [`config.private.yaml.example`](config.private.yaml.example)。
+> 换机器跑同样代码 → 数据落到**那台机器**配置的位置（不会沿用别人的盘）；结果复现取决于**数据内容**相同，与路径无关。
+
 ```bash
 # 数据源连通性自测（先跑这个确认各源可用）
 python -m src.data.fetcher --selftest
