@@ -270,6 +270,51 @@ def test_run_uses_signal_data_for_strategy_and_trade_data_for_execution():
     assert abs(res.equity_curve.iloc[1] - 1.0) < 0.001
 
 
+def test_point_in_time_signal_adjust_anchors_to_signal_day():
+    """历史时点前复权：每个信号日用当日 cum_factor 作锚点，不看未来因子。"""
+    from src.engine import Backtester
+    from src.strategy.base import BaseStrategy
+
+    dates = pd.bdate_range("2024-01-02", periods=3)
+    data = {
+        "000001.SZ": pd.DataFrame(
+            {
+                "date": dates,
+                "open": [10.0, 5.0, 5.0],
+                "high": [10.0, 5.0, 5.0],
+                "low": [10.0, 5.0, 5.0],
+                "close": [10.0, 5.0, 5.0],
+                "volume": 1e6,
+                "is_suspended": False,
+                "adj_factor": 1.0,
+                "cum_factor": [1.0, 2.0, 4.0],
+            }
+        )
+    }
+    seen: list[tuple[float, float]] = []
+
+    class Inspect(BaseStrategy):
+        strategy_name = "inspect"
+
+        def generate_signals(self, d):
+            close = d["000001.SZ"]["close"].tolist()
+            seen.append((close[0], close[-1]))
+            return self.empty_signals(d["000001.SZ"]["date"], ["000001.SZ"])
+
+    Backtester(config={"backtest": {"initial_capital": 1_000_000}}).run(
+        Inspect(),
+        dates[0].date(),
+        dates[-1].date(),
+        data=data,
+        trade_data=data,
+        point_in_time_signal_adjust=True,
+    )
+
+    assert seen[0] == (10.0, 10.0)  # D0 锚点=1，不能被未来 cum_factor=4 缩放
+    assert seen[1] == (5.0, 5.0)    # D1 锚点=2，历史 D0 前复权到 5
+    assert seen[2] == (2.5, 5.0)    # D2 锚点=4，历史 D0 前复权到 2.5
+
+
 def test_benchmark_beta_date_aligned_partial_coverage():
     """P1-1：基准不覆盖回测起点时，beta 须按日期对齐而非按位置。
 

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
-
 from src.strategy.base import BaseStrategy, Signal
 
 
@@ -76,9 +74,45 @@ def test_minute_risk_drawdown_halt_blocks_buy():
     assert res.total_trades == 0, "熔断后不应有任何新开仓成交"
 
 
-def test_minute_apply_corporate_actions_raises():
-    """P1-2 / C2：apply_corporate_actions=True 应明确报错（旧版静默忽略产出错误结果）。"""
+def test_minute_apply_corporate_actions_adjusts_raw_position():
+    """分钟 raw 交易数据跨除权日时，应按 cum_factor 调整持仓。"""
     from src.engine import MinuteBacktester
 
-    with pytest.raises(NotImplementedError):
-        MinuteBacktester(apply_corporate_actions=True)
+    dates = pd.to_datetime([
+        "2024-01-02 14:59",
+        "2024-01-02 15:00",
+        "2024-01-03 09:31",
+        "2024-01-03 09:32",
+    ])
+    data = {
+        "000001.SZ": pd.DataFrame(
+            {
+                "datetime": dates,
+                "code": "000001.SZ",
+                "open": [10.0, 10.0, 5.0, 5.0],
+                "high": [10.0, 10.0, 5.0, 5.0],
+                "low": [10.0, 10.0, 5.0, 5.0],
+                "close": [10.0, 10.0, 5.0, 5.0],
+                "volume": 1e8,
+                "limit_up": [11.0, 11.0, 5.5, 5.5],
+                "limit_down": [9.0, 9.0, 4.5, 4.5],
+                "is_suspended": False,
+                "adj_factor": 1.0,
+                "cum_factor": [1.0, 1.0, 2.0, 2.0],
+            }
+        )
+    }
+
+    class BuyFirst(BaseStrategy):
+        strategy_name = "buy_first"
+
+        def generate_signals(self, d):
+            sig = self.empty_signals(d["000001.SZ"]["datetime"], ["000001.SZ"])
+            sig.iloc[0] = int(Signal.BUY)
+            return self.validate_signals(sig)
+
+    res = MinuteBacktester(position_size=0.5, apply_corporate_actions=True).run(
+        BuyFirst(), "2024-01-02", "2024-01-03", data=data
+    )
+
+    assert res.equity_curve.iloc[2] > 0.99

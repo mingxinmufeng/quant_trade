@@ -59,6 +59,7 @@ TRADING_DAYS_PER_YEAR = 252
 
 #: 撮合 bar 需要的列
 _BAR_COLS = ("open", "high", "low", "close", "volume", "limit_up", "limit_down", "is_suspended", "adj_factor")
+_PRICE_COLS = ("open", "high", "low", "close", "limit_up", "limit_down")
 
 
 @dataclass
@@ -165,6 +166,7 @@ class Backtester:
         trade_data: dict[str, pd.DataFrame] | None = None,
         codes: Sequence[str] | None = None,
         benchmark: pd.Series | None = None,
+        point_in_time_signal_adjust: bool = False,
     ) -> BacktestResult:
         """运行回测。
 
@@ -175,13 +177,16 @@ class Backtester:
             trade_data: 交易/估值口径 ``{code: 日线df}``，应为不复权 raw；None 时沿用 data 以兼容旧接口。
             codes: data 为 None 时，要回测的股票池。
             benchmark: 基准日收盘 Series（index=date）；None 时基准指标为 0。
+            point_in_time_signal_adjust: True 时，策略按每个历史信号日的 cum_factor 对此前价格做前复权，
+                避免用未来复权因子生成历史信号。
 
         Returns:
             :class:`BacktestResult`。
         """
         s, e = parse_date(start), parse_date(end)
         if data is None:
-            data = self._load_data(codes, s, e)
+            load_adjust = "none" if point_in_time_signal_adjust or self.apply_corporate_actions else "hfq"
+            data = self._load_data(codes, s, e, adjust=load_adjust)
         signal_data = self._prepare_data(data, s, e)
         trade_data = self._prepare_data(trade_data, s, e) if trade_data is not None else signal_data
         if not signal_data or not trade_data:
@@ -196,7 +201,7 @@ class Backtester:
             return self._empty_result()
 
         # 全程信号矩阵（因果），用上一交易日信号驱动当日撮合（T+1）
-        signals = strategy.generate_signals(signal_data)
+        signals = self._generate_signals(strategy, signal_data, trading_days, point_in_time_signal_adjust)
         signals = self._align_signals(signals, trading_days, list(trade_data.keys()))
 
         # 每只股票按日期建索引，便于 O(1) 取 bar
@@ -249,11 +254,17 @@ class Backtester:
     # 数据准备
     # ------------------------------------------------------------
 
-    def _load_data(self, codes: Sequence[str] | None, s: date, e: date) -> dict[str, pd.DataFrame]:
+    def _load_data(
+        self,
+        codes: Sequence[str] | None,
+        s: date,
+        e: date,
+        adjust: str = "hfq",
+    ) -> dict[str, pd.DataFrame]:
         if self.fetcher is None or not codes:
             raise ValueError("run() 未提供 data，且 fetcher/codes 不足以加载数据")
-        logger.info(f"通过 fetcher 加载 {len(codes)} 只股票 {s}~{e} 数据（hfq）")
-        return self.fetcher.load_batch(list(codes), s, e, adjust="hfq")
+        logger.info(f"通过 fetcher 加载 {len(codes)} 只股票 {s}~{e} 数据（{adjust}）")
+        return self.fetcher.load_batch(list(codes), s, e, adjust=adjust)
 
     @staticmethod
     def _prepare_data(data: dict[str, pd.DataFrame], s: date, e: date) -> dict[str, pd.DataFrame]:
@@ -291,6 +302,67 @@ class Backtester:
         sig.index = pd.DatetimeIndex(pd.to_datetime(sig.index)).normalize()
         sig = sig.reindex(index=pd.DatetimeIndex(days), columns=codes).fillna(int(Signal.HOLD))
         return sig.astype("int64")
+
+    def _generate_signals(
+        self,
+        strategy: BaseStrategy,
+        data: dict[str, pd.DataFrame],
+        days: list[pd.Timestamp],
+        point_in_time_adjust: bool,
+    ) -> pd.DataFrame:
+        if not point_in_time_adjust:
+            return strategy.generate_signals(data)
+        rows: list[pd.Series] = []
+        idx: list[pd.Timestamp] = []
+        codes = list(data.keys())
+        for day in days:
+            visible = self._point_in_time_adjust_data(data, day, time_col="date")
+            if not visible:
+                continue
+            sig = strategy.generate_signals(visible)
+            aligned = self._align_signals(sig, [day], codes)
+            rows.append(aligned.iloc[0])
+            idx.append(day)
+        if not rows:
+            return pd.DataFrame(int(Signal.HOLD), index=pd.DatetimeIndex(days), columns=codes, dtype="int64")
+        out = pd.DataFrame(rows, index=pd.DatetimeIndex(idx), columns=codes)
+        out.index.name = "date"
+        return out
+
+    @staticmethod
+    def _point_in_time_adjust_data(
+        data: dict[str, pd.DataFrame],
+        as_of: pd.Timestamp,
+        *,
+        time_col: str,
+    ) -> dict[str, pd.DataFrame]:
+        """以 as_of 当日累计因子为锚点，对可见历史价格做前复权。"""
+        out: dict[str, pd.DataFrame] = {}
+        as_of = pd.Timestamp(as_of)
+        for code, df in data.items():
+            if df is None or df.empty or time_col not in df.columns:
+                continue
+            d = df.copy()
+            d[time_col] = pd.to_datetime(d[time_col])
+            d = d[d[time_col] <= as_of].copy()
+            if d.empty:
+                continue
+            if "cum_factor" not in d.columns:
+                out[code] = d
+                continue
+            cum = pd.to_numeric(d["cum_factor"], errors="coerce").ffill().bfill()
+            if cum.empty or not cum.notna().any():
+                out[code] = d
+                continue
+            anchor = float(cum.iloc[-1])
+            if anchor > 0:
+                mult = (cum / anchor).to_numpy(dtype="float64")
+                for col in _PRICE_COLS:
+                    if col in d.columns:
+                        d[col] = pd.to_numeric(d[col], errors="coerce").to_numpy(dtype="float64") * mult
+                d["adj_factor"] = mult
+            out[code] = d.reset_index(drop=True)
+        return out
 
     # ------------------------------------------------------------
     # 日内撮合
@@ -388,8 +460,35 @@ class Backtester:
             if factor_col not in df.columns:
                 continue
             ratio = ExecutionEngine.detect_ex_factor_ratio(df.loc[prev_day, factor_col], df.loc[day, factor_col])
-            if ratio > 1.001:
-                self.execution.apply_corporate_action(pf, code, ratio)
+            cash_div = self._cash_dividend_per_share(df, day)
+            if ratio > 1.001 or cash_div > 0:
+                self.execution.apply_corporate_action(
+                    pf,
+                    code,
+                    ratio,
+                    cash_dividend_per_share_gross=cash_div,
+                    action_date=day.date(),
+                )
+
+    @staticmethod
+    def _cash_dividend_per_share(df: pd.DataFrame, day: pd.Timestamp) -> float:
+        row = df.loc[day]
+        if isinstance(row, pd.DataFrame):
+            row = row.iloc[-1]
+        for col in ("cash_dividend_per_share_gross", "cash_dividend", "fenhong_per_share"):
+            if col in row.index:
+                try:
+                    val = float(row[col])
+                except (TypeError, ValueError):
+                    return 0.0
+                return val if val == val and val > 0 else 0.0
+        if "fenhong" in row.index:
+            try:
+                val = float(row["fenhong"]) / 10.0
+            except (TypeError, ValueError):
+                return 0.0
+            return val if val == val and val > 0 else 0.0
+        return 0.0
 
     def _liquidate_ended_positions(self, pf, day, last_dt: dict, final_day) -> None:
         """对"行情已终止"（最后一根数据早于回测末日）的持仓按最后市价强制清仓。

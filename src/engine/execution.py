@@ -361,16 +361,24 @@ class ExecutionEngine:
         code: str,
         factor_ratio: float,
         cash_dividend_per_share_after_tax: float = 0.0,
+        cash_dividend_per_share_gross: float = 0.0,
+        action_date: date | datetime | None = None,
     ) -> None:
         """在除权日对持仓做送转/分红调整（除权日前一交易日收盘后触发）。
 
         Args:
             factor_ratio: 复权因子变化率（>1 表示发生送转/分红，用于送股折算股数）。
             cash_dividend_per_share_after_tax: 税后每股现金红利（由数据层提供；>0 时计入现金）。
+            cash_dividend_per_share_gross: 税前每股现金红利（gbbq 口径）；先全额入账，卖出时扣税。
+            action_date: 除权除息日，用于递延红利税记录。
         """
         if not portfolio.has_position(code):
             return
-        if cash_dividend_per_share_after_tax > 0:
+        if cash_dividend_per_share_gross > 0 and hasattr(portfolio, "add_taxable_cash_dividend"):
+            portfolio.add_taxable_cash_dividend(
+                code, cash_dividend_per_share_gross, action_date or date.today()
+            )
+        elif cash_dividend_per_share_after_tax > 0:
             portfolio.add_cash_dividend(code, cash_dividend_per_share_after_tax)
         if factor_ratio > 1.001:
             # 不整手：A 股送转产生的零股可保留并一次性卖出（execution._match_sell 已支持
