@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 def _bt(**kw):
@@ -130,6 +131,82 @@ def test_delisted_position_force_liquidated():
     last_pos = res.daily_positions.iloc[-1]
     assert last_pos.get("000002.SZ", 0) == 0, "退市股回测末日不应仍被持有（幻值）"
     assert last_pos.get("000001.SZ", 0) > 0, "正常持有到末日的股票不应被误清"
+
+
+def test_none_adjust_corporate_action_uses_cum_factor():
+    """不复权 raw 价格跨除权日时，应按 cum_factor 调整股数，避免把除权跳空算亏损。"""
+    from src.engine import Backtester
+    from src.strategy.base import BaseStrategy, Signal
+
+    dates = pd.bdate_range("2024-01-02", periods=4)
+    data = {
+        "000001.SZ": pd.DataFrame(
+            {
+                "date": dates,
+                "open": [10.0, 10.0, 5.0, 5.0],
+                "high": [10.0, 10.0, 5.0, 5.0],
+                "low": [10.0, 10.0, 5.0, 5.0],
+                "close": [10.0, 10.0, 5.0, 5.0],
+                "volume": 1e6,
+                "is_suspended": False,
+                "adj_factor": 1.0,                    # none 口径下价格乘数恒为 1
+                "cum_factor": [1.0, 1.0, 2.0, 2.0],   # 除权真实触发器
+            }
+        )
+    }
+
+    class BuyHold(BaseStrategy):
+        strategy_name = "buyhold"
+
+        def generate_signals(self, d):
+            sig = self.empty_signals(d["000001.SZ"]["date"], ["000001.SZ"])
+            sig.iloc[0, 0] = int(Signal.BUY)
+            return self.validate_signals(sig)
+
+    res = Backtester(
+        config={"backtest": {"initial_capital": 1_000_000}},
+        position_size=0.5,
+        apply_corporate_actions=True,
+    ).run(BuyHold(), dates[0].date(), dates[-1].date(), data=data)
+
+    pos = res.daily_positions["000001.SZ"]
+    assert pos.iloc[1] == 50_000
+    assert pos.iloc[2] == 100_000
+    assert res.equity_curve.iloc[2] > 0.99
+
+
+def test_apply_corporate_actions_rejects_adjusted_data_without_cum_factor():
+    """apply_corporate_actions=True 不应接受疑似 hfq/qfq 数据，避免除权双重计提。"""
+    from src.engine import Backtester
+    from src.strategy.base import BaseStrategy
+
+    dates = pd.bdate_range("2024-01-02", periods=3)
+    data = {
+        "000001.SZ": pd.DataFrame(
+            {
+                "date": dates,
+                "open": [10.0, 10.0, 10.0],
+                "high": [10.0, 10.0, 10.0],
+                "low": [10.0, 10.0, 10.0],
+                "close": [10.0, 10.0, 10.0],
+                "volume": 1e6,
+                "is_suspended": False,
+                "adj_factor": [1.0, 2.0, 2.0],
+            }
+        )
+    }
+
+    class Flat(BaseStrategy):
+        strategy_name = "flat"
+
+        def generate_signals(self, d):
+            return self.empty_signals(d["000001.SZ"]["date"], ["000001.SZ"])
+
+    with pytest.raises(ValueError, match="疑似 hfq/qfq 数据"):
+        Backtester(
+            config={"backtest": {"initial_capital": 1_000_000}},
+            apply_corporate_actions=True,
+        ).run(Flat(), dates[0].date(), dates[-1].date(), data=data)
 
 
 def test_benchmark_beta_date_aligned_partial_coverage():

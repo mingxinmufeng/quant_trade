@@ -34,7 +34,7 @@ import pandas as pd
 from loguru import logger
 
 from ..utils.helpers import ensure_dir
-from .adjust import apply_adjust, cum_factor_at
+from .adjust import align_cum_factor, apply_adjust, cum_factor_at
 from .factors import FACTOR_COLUMNS
 
 # ============================================================
@@ -257,7 +257,14 @@ class DataStore:
             raw = self.read_raw(code, freq)
             if raw is None:
                 return None
-            return apply_adjust(raw, self._effective_factor(code, use_gbbq), mode="none", time_col=tc)
+            factor = self._effective_factor(code, use_gbbq)
+            out = apply_adjust(raw, factor, mode="none", time_col=tc)
+            # Keep adj_factor as the actual price multiplier for "none" (=1.0), but
+            # expose the cumulative factor so backtests can handle corporate actions
+            # on raw prices without treating ex-right gaps as losses.
+            if out is not None and not out.empty:
+                out["cum_factor"] = align_cum_factor(out[tc], factor)
+            return out
 
         hfq = self.get_hfq(code, freq, use_gbbq)
         if hfq is None:
