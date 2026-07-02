@@ -105,6 +105,21 @@ def test_resample_daily_weekly():
     assert wk["high"].iloc[0] <= df["high"].max() + 1e-9
 
 
+def test_resample_daily_preserves_cum_factor():
+    """周/月等重采样须保留累计因子，供 none 回测做除权持仓调整。"""
+    from src.data import resample_daily
+
+    df = _raw_daily(n=10)
+    df["adj_factor"] = 1.0
+    df["cum_factor"] = [1.0] * 5 + [2.0] * 5
+
+    wk = resample_daily(df, "weekly")
+
+    assert "adj_factor" in wk.columns
+    assert "cum_factor" in wk.columns
+    assert wk["cum_factor"].tolist() == [1.0, 2.0, 2.0]
+
+
 def test_resample_weekly_bar_date_is_real_trading_day():
     """P2-7：周线 bar 日期取 bin 内真实最后交易日，而非 W-FRI 的周五标签（可能落非交易日）。"""
     from src.data import resample_daily

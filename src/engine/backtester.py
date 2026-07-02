@@ -184,6 +184,8 @@ class Backtester:
         if not data:
             logger.warning("回测数据为空，返回空结果")
             return self._empty_result()
+        if self.apply_corporate_actions:
+            self._validate_corporate_action_inputs(data)
 
         trading_days = self._trading_days(data, s, e)
         if len(trading_days) < 2:
@@ -358,6 +360,20 @@ class Backtester:
                     row = row.iloc[-1]
                 out[code] = row["close"]
         return out
+
+    @staticmethod
+    def _validate_corporate_action_inputs(data: dict[str, pd.DataFrame]) -> None:
+        """Guard against applying split/dividend adjustments to adjusted-price data."""
+        for code, df in data.items():
+            if df is None or df.empty or "cum_factor" in df.columns or "adj_factor" not in df.columns:
+                continue
+            adj = pd.to_numeric(df["adj_factor"], errors="coerce").dropna()
+            if not adj.empty and not np.isclose(adj.to_numpy(dtype="float64"), 1.0).all():
+                raise ValueError(
+                    "apply_corporate_actions=True 仅支持不复权 raw 数据；"
+                    f"{code} 缺少 cum_factor 且 adj_factor 非 1.0，疑似 hfq/qfq 数据，"
+                    "继续会造成除权双重计提"
+                )
 
     def _handle_corporate_actions(self, pf, indexed, prev_day, day) -> None:
         """不复权数据下，按累计复权因子变化率对持仓做除权调整。"""
