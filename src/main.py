@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import pandas as pd
 import typer
 from loguru import logger
 
@@ -118,6 +119,42 @@ def _resolve_codes(cfg, codes: str | None, as_of: date, limit: int) -> list[str]
     return tradable[:limit]
 
 
+def _attach_gbbq_cash_dividends(fetcher, data: dict, time_col: str) -> dict:
+    """把 gbbq 税前现金分红按除权日贴到行情上（每股口径）。"""
+    out = {}
+    gbbq = getattr(fetcher, "_gbbq", None)
+    for code, df in data.items():
+        if df is None or df.empty or time_col not in df.columns:
+            out[code] = df
+            continue
+        d = df.copy()
+        d[time_col] = pd.to_datetime(d[time_col])
+        d["cash_dividend_per_share_gross"] = 0.0
+        if gbbq is None:
+            out[code] = d
+            continue
+        try:
+            events = gbbq.events(code)
+        except Exception as exc:
+            logger.debug(f"[{code}] gbbq 分红事件读取失败，跳过红利税建模: {exc}")
+            out[code] = d
+            continue
+        if events is None or events.empty or "fenhong" not in events.columns:
+            out[code] = d
+            continue
+        div = events[["date", "fenhong"]].copy()
+        div["date"] = pd.to_datetime(div["date"]).dt.normalize()
+        div["cash_dividend_per_share_gross"] = pd.to_numeric(div["fenhong"], errors="coerce").fillna(0.0) / 10.0
+        div = div[div["cash_dividend_per_share_gross"] > 0]
+        if div.empty:
+            out[code] = d
+            continue
+        div_map = div.set_index("date")["cash_dividend_per_share_gross"]
+        d["cash_dividend_per_share_gross"] = d[time_col].dt.normalize().map(div_map).fillna(0.0)
+        out[code] = d
+    return out
+
+
 def _walk_forward_windows(days: list, folds: int) -> list[tuple]:
     """把交易日序列切成 ``folds`` 个 (训练, 测试) 滚动窗口（防过拟合的样本外验证）。
 
@@ -202,7 +239,7 @@ def backtest(
     end: str = typer.Option(..., "--end", help="结束日期 YYYY-MM-DD"),
     codes: str | None = typer.Option(None, "--codes", help="空格/逗号分隔股票代码；缺省用 Universe"),
     limit: int = typer.Option(50, "--limit", help="缺省 codes 时从 Universe 取的股票数上限"),
-    adjust: str = typer.Option("hfq", "--adjust", help="复权方式 none/hfq/qfq（回测建议 hfq；none 时自动对持仓做除权调整）"),
+    adjust: str = typer.Option("qfq", "--adjust", help="信号数据复权方式 qfq/hfq/none；qfq 为历史时点前复权，成交/估值始终使用 none raw"),
     position_size: float | None = typer.Option(None, "--position-size", help="单票目标权重；缺省取 risk.max_single_position"),
     output: str | None = typer.Option(None, "--output", help="将净值曲线写出到该 CSV"),
     config: str | None = typer.Option(None, "--config", help="配置文件路径"),
@@ -225,9 +262,15 @@ def backtest(
 
     code_list = _resolve_codes(cfg, codes, s, limit)
     fetcher = _build_fetcher(cfg)
-    logger.info(f"加载 {len(code_list)} 只股票数据 {s}~{e}（adjust={adjust}）")
-    data = fetcher.load_batch(code_list, s, e, adjust=adjust)
-    if not data:
+    signal_adjust = adjust.strip().lower()
+    pit_signal = signal_adjust == "qfq"
+    load_adjust = "none" if pit_signal else signal_adjust
+    logger.info(f"加载 {len(code_list)} 只股票信号数据 {s}~{e}（adjust={signal_adjust}）")
+    data = fetcher.load_batch(code_list, s, e, adjust=load_adjust)
+    logger.info(f"加载 {len(code_list)} 只股票交易数据 {s}~{e}（adjust=none raw）")
+    trade_data = fetcher.load_batch(code_list, s, e, adjust="none")
+    trade_data = _attach_gbbq_cash_dividends(fetcher, trade_data, "date")
+    if not data or not trade_data:
         raise typer.Exit(code=1)
 
     # 基准：指数不在常规股票清单里，缺则按需 update 补全（pytdx 本地源近乎瞬时）
@@ -245,14 +288,21 @@ def backtest(
             logger.warning(f"基准 {bench_code} 载入失败（{exc}），跳过基准对比")
 
     risk = RiskManager.from_config(cfg)
-    # none（不复权）数据含除权跳空，须对持仓做除权调整，否则跳空被当亏损 → 结果失真；
-    # hfq/qfq 已把送转/分红折进价格，保持 False（开启会双重计提）。
-    apply_ca = adjust.strip().lower() == "none"
     bt = Backtester(config=cfg, calendar=fetcher._calendar, risk_manager=risk,
-                    position_size=position_size, apply_corporate_actions=apply_ca)
-    if apply_ca:
-        logger.info("adjust=none：已自动开启持仓除权调整（apply_corporate_actions=True）")
-    result = bt.run(strat, s, e, data=data, benchmark=benchmark)
+                    position_size=position_size, apply_corporate_actions=True)
+    logger.info(
+        f"双数据口径：信号使用 adjust={signal_adjust}"
+        f"{'（历史时点前复权）' if pit_signal else ''}，成交/资金/估值使用 none raw，并开启持仓除权调整"
+    )
+    result = bt.run(
+        strat,
+        s,
+        e,
+        data=data,
+        trade_data=trade_data,
+        benchmark=benchmark,
+        point_in_time_signal_adjust=pit_signal,
+    )
 
     typer.echo("\n===== 回测绩效 =====")
     typer.echo(result.summary())
@@ -284,7 +334,7 @@ def optimize(
     trials: int = typer.Option(30, "--trials", help="每折 Optuna 试验次数"),
     folds: int = typer.Option(3, "--folds", help="walk-forward 滚动折数（训练段锚定起点扩张、测试段紧邻其后）；1=单次五五分样本内外"),
     metric: str = typer.Option("sharpe", "--metric", help="优化目标：sharpe/annual/calmar"),
-    adjust: str = typer.Option("hfq", "--adjust", help="复权方式 none/hfq/qfq（建议 hfq；none 时自动对持仓做除权调整）"),
+    adjust: str = typer.Option("qfq", "--adjust", help="信号数据复权方式 qfq/hfq/none；qfq 为历史时点前复权，成交/估值始终使用 none raw"),
     config: str | None = typer.Option(None, "--config", help="配置文件路径"),
     store_path: str | None = typer.Option(None, "--store-path", help="数据仓库根目录（最高优先级覆盖 config/环境变量；缺省按配置链解析）"),
 ):
@@ -310,8 +360,15 @@ def optimize(
 
     code_list = _resolve_codes(cfg, codes, s, limit)
     fetcher = _build_fetcher(cfg)
-    data = fetcher.load_batch(code_list, s, e, adjust=adjust)
-    if not data:
+    signal_adjust = adjust.strip().lower()
+    pit_signal = signal_adjust == "qfq"
+    load_adjust = "none" if pit_signal else signal_adjust
+    logger.info(f"加载 {len(code_list)} 只股票信号数据 {s}~{e}（adjust={signal_adjust}）")
+    data = fetcher.load_batch(code_list, s, e, adjust=load_adjust)
+    logger.info(f"加载 {len(code_list)} 只股票交易数据 {s}~{e}（adjust=none raw）")
+    trade_data = fetcher.load_batch(code_list, s, e, adjust="none")
+    trade_data = _attach_gbbq_cash_dividends(fetcher, trade_data, "date")
+    if not data or not trade_data:
         raise typer.Exit(code=1)
 
     metric_attr = {"sharpe": "sharpe_ratio", "annual": "annual_return", "calmar": "calmar_ratio"}.get(metric)
@@ -325,9 +382,8 @@ def optimize(
         raise typer.BadParameter(str(exc)) from exc
 
     risk = RiskManager.from_config(cfg)
-    # 同 backtest：none 数据须开持仓除权调整；hfq/qfq 已折除权，保持 False。
     bt = Backtester(config=cfg, calendar=fetcher._calendar, risk_manager=risk,
-                    apply_corporate_actions=adjust.strip().lower() == "none")
+                    apply_corporate_actions=True)
 
     typer.echo(f"\n===== Walk-forward 调参（{folds} 折，样本外验证）=====")
     oos_metrics: list[float] = []
@@ -335,13 +391,27 @@ def optimize(
         # 默认参数绑定避免闭包晚绑定（study.optimize 在本折同步调用 objective）
         def objective(trial: optuna.Trial, _ts=tr_s, _te=tr_e) -> float:
             params = strat_cls().get_param_space(trial)
-            res = bt.run(strat_cls(**params), _ts, _te, data=data)
+            res = bt.run(
+                strat_cls(**params),
+                _ts,
+                _te,
+                data=data,
+                trade_data=trade_data,
+                point_in_time_signal_adjust=pit_signal,
+            )
             return float(getattr(res, metric_attr))
 
         study = optuna.create_study(direction="maximize")
         study.optimize(objective, n_trials=trials)
         best = study.best_params
-        test_res = bt.run(strat_cls(**best), te_s, te_e, data=data)
+        test_res = bt.run(
+            strat_cls(**best),
+            te_s,
+            te_e,
+            data=data,
+            trade_data=trade_data,
+            point_in_time_signal_adjust=pit_signal,
+        )
         test_metric = float(getattr(test_res, metric_attr))
         oos_metrics.append(test_metric)
         typer.echo(

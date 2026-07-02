@@ -64,7 +64,7 @@ def load_industry_map(
 
         df = pd.read_parquet(p)
         df = df.dropna(subset=["code", "industry"])
-        return {format_code(str(c)): str(ind) for c, ind in zip(df["code"], df["industry"])}
+        return {format_code(str(c)): str(ind) for c, ind in zip(df["code"], df["industry"], strict=True)}
     except Exception as exc:
         logger.warning(f"读取行业映射 {p} 失败: {exc}")
         return {}

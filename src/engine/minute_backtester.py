@@ -21,9 +21,9 @@ A 股制度
 
 复权口径
 --------
-默认在 **hfq（后复权）** 分钟价上回测（``DataStore.load(freq, adjust='hfq')``），与日级引擎默认
-口径一致：复权价已把送转/分红连续折进价格，**无需**再对持仓做除权调整
-（``apply_corporate_actions=False``）。
+支持与日级一致的双数据口径：策略信号可用历史时点前复权数据，撮合/资金/估值使用
+``none`` raw 分钟真实价。``apply_corporate_actions=True`` 时，跨交易日按 raw 数据上的
+``cum_factor`` 变化调整持仓，并可按税前现金分红递延扣红利税。
 
 年化
 ----
@@ -51,6 +51,7 @@ from ..utils.helpers import (
 )
 from .backtester import (
     TRADING_DAYS_PER_YEAR,
+    Backtester,
     BacktestResult,
     Trade,
     _get,
@@ -77,9 +78,7 @@ class MinuteBacktester:
         store: :class:`~src.data.storage.DataStore`；``run`` 未直接传 data 时用于加载分钟数据。
         freq: 分钟周期（``min1`` / ``min5``）。
         position_size: 单票目标权重；None 时取 ``risk.max_single_position`` 或 0.2。
-        apply_corporate_actions: **分钟级暂不支持**，仅保留以与日级签名一致。分钟回测请用
-            hfq 复权口径（送转/分红已折进价格，无需对持仓做除权调整）；传 ``True`` 会抛
-            ``NotImplementedError``（旧版会静默忽略，产出错误结果）。
+        apply_corporate_actions: 是否在分钟 raw 交易数据上按日级 cum_factor 变化调整持仓。
     """
 
     def __init__(
@@ -101,14 +100,7 @@ class MinuteBacktester:
         else:
             self.execution = ExecutionEngine.from_config(config or {}, risk_manager)
             self.execution.intraday = True          # 分钟级强制日内涨跌停夹价
-        # 分钟级除权调整尚未实现：旧版把该参数存下却从不使用（静默无效），导致非复权数据
-        # 下持仓不做送转折算而无人察觉。改为传 True 即明确报错，引导改用 hfq 口径。
-        if apply_corporate_actions:
-            raise NotImplementedError(
-                "MinuteBacktester 暂不支持持仓除权调整（apply_corporate_actions=True）："
-                "分钟级请用 hfq 复权口径（送转/分红已折进价格，无需调整持仓）。"
-            )
-        self.apply_corporate_actions = False
+        self.apply_corporate_actions = bool(apply_corporate_actions)
 
         bt = _section(config, "backtest")
         rk = _section(config, "risk")
@@ -130,42 +122,62 @@ class MinuteBacktester:
         start: str | date | datetime,
         end: str | date | datetime,
         data: dict[str, pd.DataFrame] | None = None,
+        trade_data: dict[str, pd.DataFrame] | None = None,
         codes: Sequence[str] | None = None,
         benchmark: pd.Series | None = None,
+        point_in_time_signal_adjust: bool = False,
     ) -> BacktestResult:
         """运行分钟级回测。
 
         Args:
             strategy: 策略实例（信号矩阵 index 为分钟时间戳）。
             start/end: 回测区间（含）。
-            data: 预加载的 ``{code: 分钟 df}``（含 ``datetime`` 列 + OHLCV，建议 hfq；
-                若缺 ``limit_up/limit_down/is_suspended`` 列，撮合按无涨跌停约束处理）；
-                None 时用 ``store`` 加载。
+            data: 信号口径 ``{code: 分钟 df}``；qfq 历史时点前复权模式下应为 raw + cum_factor。
+            trade_data: 交易/估值口径分钟数据，应为 none raw；None 时沿用 data 兼容旧接口。
             codes: data 为 None 时要回测的股票池。
             benchmark: 暂未支持分钟基准对比，alpha/beta 记 0。
+            point_in_time_signal_adjust: True 时按 cum_factor 变化点分段、每段只调用一次
+                ``strategy.generate_signals``（而非逐 bar 调用），要求策略严格遵守
+                :class:`~src.strategy.base.BaseStrategy` 的因果契约，语义同
+                :meth:`~src.engine.backtester.Backtester.run` 对应参数。
 
         Returns:
             :class:`~src.engine.backtester.BacktestResult`。
         """
         s, e = parse_date(start), parse_date(end)
+        auto_loaded_raw_signal = False
         if data is None:
-            data = self._load_data(codes, s, e)
-        data = self._prepare_data(data, s, e)
-        if not data:
+            if self.apply_corporate_actions or point_in_time_signal_adjust:
+                data = self.load_trade_data(codes, s, e)
+                if trade_data is None:
+                    trade_data = data
+                auto_loaded_raw_signal = self.apply_corporate_actions and not point_in_time_signal_adjust
+            else:
+                data = self._load_data(codes, s, e)
+        signal_data = self._prepare_data(data, s, e)
+        trade_data = self._prepare_data(trade_data, s, e) if trade_data is not None else signal_data
+        if not signal_data or not trade_data:
             logger.warning("分钟回测数据为空，返回空结果")
             return self._empty_result()
+        if self.apply_corporate_actions:
+            Backtester._validate_corporate_action_inputs(trade_data)
 
         # 全 code 并集的有序分钟时间轴
-        timeline = self._timeline(data)
+        timeline = self._timeline(trade_data)
         if len(timeline) < 2:
             logger.warning("可用 bar 不足 2 根，返回空结果")
             return self._empty_result()
+        if auto_loaded_raw_signal:
+            logger.warning(
+                "MinuteBacktester 自动加载了 none raw 分钟数据作为信号口径，但 "
+                "point_in_time_signal_adjust=False；策略信号可能受除权跳空影响。"
+            )
 
         # 全程信号矩阵（因果），对齐到时间轴与 code（用上一根 bar 信号撮合 → 强制一 bar 滞后）
-        signals = strategy.generate_signals(data)
-        signals = self._align_signals(signals, timeline, list(data.keys()))
+        signals = self._generate_signals(strategy, signal_data, timeline, point_in_time_signal_adjust)
+        signals = self._align_signals(signals, timeline, list(trade_data.keys()))
 
-        indexed = {code: df.set_index("datetime") for code, df in data.items()}
+        indexed = {code: df.set_index("datetime") for code, df in trade_data.items()}
 
         pf = Portfolio(self.initial_capital, t1_cash_freeze=self.t1_cash_freeze)
         # 风控初始化（仅在显式注入 risk_manager 时启用止损/熔断/仓位限制；与日级一致）
@@ -182,6 +194,8 @@ class MinuteBacktester:
             cur_day = ts.date()
             if cur_day != prev_day:
                 pf.settle_new_day()              # 跨交易日：解冻 T+1（每日仅一次）
+                if self.apply_corporate_actions and prev_ts is not None:
+                    self._handle_corporate_actions(pf, indexed, prev_ts, ts)
                 # 风控：跨交易日刷新当日起点权益与历史峰值（单日止损 / 累计回撤熔断基准）
                 if self.risk_manager is not None and hasattr(self.risk_manager, "on_new_day"):
                     self.risk_manager.on_new_day(pf)
@@ -222,6 +236,20 @@ class MinuteBacktester:
             daily = self.store.load(code, "daily", adjust="hfq")
             out[code] = self._inject_daily_limits(mdf, daily)
         logger.info(f"通过 store 加载 {len(out)} 只股票 {s}~{e} 的 {self.freq} 数据（hfq）")
+        return out
+
+    def load_trade_data(self, codes: Sequence[str] | None, s: date, e: date) -> dict[str, pd.DataFrame]:
+        """用 DataStore 加载 none raw 分钟交易数据，并注入 raw 日级涨跌停/停牌列。"""
+        if self.store is None or not codes:
+            raise ValueError("store/codes 不足以加载分钟交易数据")
+        out: dict[str, pd.DataFrame] = {}
+        for code in codes:
+            mdf = self.store.load(code, self.freq, adjust="none")
+            if mdf is None or mdf.empty:
+                continue
+            daily = self.store.load(code, "daily", adjust="none")
+            out[code] = self._inject_daily_limits(mdf, daily)
+        logger.info(f"通过 store 加载 {len(out)} 只股票 {s}~{e} 的 {self.freq} raw 交易数据")
         return out
 
     @staticmethod
@@ -276,6 +304,41 @@ class MinuteBacktester:
         sig.index = pd.DatetimeIndex(pd.to_datetime(sig.index))
         sig = sig.reindex(index=idx, columns=codes).fillna(int(Signal.HOLD))
         return sig.astype("int64")
+
+    def _generate_signals(
+        self,
+        strategy: BaseStrategy,
+        data: dict[str, pd.DataFrame],
+        timeline: list[pd.Timestamp],
+        point_in_time_adjust: bool,
+    ) -> pd.DataFrame:
+        if not point_in_time_adjust:
+            return strategy.generate_signals(data)
+        codes = list(data.keys())
+        seg_ends = Backtester._pit_segment_end_marks(data, timeline, time_col="datetime")
+        if len(seg_ends) > 500:
+            logger.warning(
+                f"point_in_time_signal_adjust=True 检测到 {len(seg_ends)} 个除权分段，"
+                "仍需按段重算策略信号，除权密集的大股票池/长区间分钟回测可能变慢。"
+            )
+        frames: list[pd.DataFrame] = []
+        start = 0
+        ts_index = {t: i for i, t in enumerate(timeline)}
+        for seg_end in seg_ends:
+            seg_marks = timeline[start : ts_index[seg_end] + 1]
+            start = ts_index[seg_end] + 1
+            if not seg_marks:
+                continue
+            visible = Backtester._point_in_time_adjust_data(data, seg_end, time_col="datetime")
+            if not visible:
+                continue
+            sig = strategy.generate_signals(visible)
+            frames.append(self._align_signals(sig, seg_marks, codes))
+        if not frames:
+            return pd.DataFrame(int(Signal.HOLD), index=pd.DatetimeIndex(timeline), columns=codes, dtype="int64")
+        out = pd.concat(frames)
+        out.index.name = "datetime"
+        return out
 
     # ------------------------------------------------------------
     # 逐 bar 撮合（先卖后买）
@@ -347,6 +410,25 @@ class MinuteBacktester:
                     row = row.iloc[-1]
                 out[code] = row["close"]
         return out
+
+    def _handle_corporate_actions(self, pf, indexed, prev_ts, ts) -> None:
+        for code in list(pf.positions.keys()):
+            df = indexed.get(code)
+            if df is None or ts not in df.index or prev_ts not in df.index:
+                continue
+            factor_col = "cum_factor" if "cum_factor" in df.columns else "adj_factor"
+            if factor_col not in df.columns:
+                continue
+            ratio = ExecutionEngine.detect_ex_factor_ratio(df.loc[prev_ts, factor_col], df.loc[ts, factor_col])
+            cash_div = Backtester._cash_dividend_per_share(df, ts)
+            if ratio > 1.001 or cash_div > 0:
+                self.execution.apply_corporate_action(
+                    pf,
+                    code,
+                    ratio,
+                    cash_dividend_per_share_gross=cash_div,
+                    action_date=ts,
+                )
 
     # ------------------------------------------------------------
     # 年化因子 / 绩效
