@@ -315,6 +315,49 @@ def test_point_in_time_signal_adjust_anchors_to_signal_day():
     assert seen[2] == (2.5, 5.0)    # D2 锚点=4，历史 D0 前复权到 2.5
 
 
+def test_point_in_time_signal_adjust_batches_by_corporate_action_segment():
+    """锚点不变的连续交易日应合并成一次策略调用，且不泄露分段之外的未来行。"""
+    from src.engine import Backtester
+    from src.strategy.base import BaseStrategy
+
+    dates = pd.bdate_range("2024-01-02", periods=5)
+    data = {
+        "000001.SZ": pd.DataFrame(
+            {
+                "date": dates,
+                "open": [10.0, 10.0, 10.0, 5.0, 5.0],
+                "high": [10.0, 10.0, 10.0, 5.0, 5.0],
+                "low": [10.0, 10.0, 10.0, 5.0, 5.0],
+                "close": [10.0, 10.0, 10.0, 5.0, 5.0],
+                "volume": 1e6,
+                "is_suspended": False,
+                "adj_factor": 1.0,
+                # 前 3 天锚点不变 (1.0)，第 4/5 天除权后锚点变为 2.0：应合并为 2 段/2 次调用。
+                "cum_factor": [1.0, 1.0, 1.0, 2.0, 2.0],
+            }
+        )
+    }
+    calls: list[int] = []  # 每次调用时看到的行数（用于验证未泄露分段外的未来行）
+
+    class Inspect(BaseStrategy):
+        strategy_name = "inspect"
+
+        def generate_signals(self, d):
+            calls.append(len(d["000001.SZ"]))
+            return self.empty_signals(d["000001.SZ"]["date"], ["000001.SZ"])
+
+    Backtester(config={"backtest": {"initial_capital": 1_000_000}}).run(
+        Inspect(),
+        dates[0].date(),
+        dates[-1].date(),
+        data=data,
+        trade_data=data,
+        point_in_time_signal_adjust=True,
+    )
+
+    assert calls == [3, 5], "应合并成 2 次调用（前 3 天一段、后 2 天一段），而非逐日 5 次"
+
+
 def test_benchmark_beta_date_aligned_partial_coverage():
     """P1-1：基准不覆盖回测起点时，beta 须按日期对齐而非按位置。
 

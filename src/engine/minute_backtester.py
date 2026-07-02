@@ -310,25 +310,29 @@ class MinuteBacktester:
     ) -> pd.DataFrame:
         if not point_in_time_adjust:
             return strategy.generate_signals(data)
-        if len(timeline) > 5_000:
-            logger.warning(
-                f"point_in_time_signal_adjust=True 会按每根分钟 bar 重算策略信号（约 {len(timeline)} 次），"
-                "分钟级长区间回测可能非常慢。"
-            )
-        rows: list[pd.Series] = []
-        idx: list[pd.Timestamp] = []
         codes = list(data.keys())
-        for ts in timeline:
-            visible = Backtester._point_in_time_adjust_data(data, ts, time_col="datetime")
+        seg_ends = Backtester._pit_segment_end_marks(data, timeline, time_col="datetime")
+        if len(seg_ends) > 500:
+            logger.warning(
+                f"point_in_time_signal_adjust=True 检测到 {len(seg_ends)} 个除权分段，"
+                "仍需按段重算策略信号，除权密集的大股票池/长区间分钟回测可能变慢。"
+            )
+        frames: list[pd.DataFrame] = []
+        start = 0
+        ts_index = {t: i for i, t in enumerate(timeline)}
+        for seg_end in seg_ends:
+            seg_marks = timeline[start : ts_index[seg_end] + 1]
+            start = ts_index[seg_end] + 1
+            if not seg_marks:
+                continue
+            visible = Backtester._point_in_time_adjust_data(data, seg_end, time_col="datetime")
             if not visible:
                 continue
             sig = strategy.generate_signals(visible)
-            aligned = self._align_signals(sig, [ts], codes)
-            rows.append(aligned.iloc[0])
-            idx.append(ts)
-        if not rows:
+            frames.append(self._align_signals(sig, seg_marks, codes))
+        if not frames:
             return pd.DataFrame(int(Signal.HOLD), index=pd.DatetimeIndex(timeline), columns=codes, dtype="int64")
-        out = pd.DataFrame(rows, index=pd.DatetimeIndex(idx), columns=codes)
+        out = pd.concat(frames)
         out.index.name = "datetime"
         return out
 

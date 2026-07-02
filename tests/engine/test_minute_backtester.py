@@ -116,3 +116,54 @@ def test_minute_apply_corporate_actions_adjusts_raw_position():
     )
 
     assert res.equity_curve.iloc[2] > 0.99
+
+
+def test_minute_point_in_time_signal_adjust_batches_by_corporate_action_segment():
+    """分钟级历史时点前复权：锚点不变的连续 bar 应合并成一次策略调用，不逐 bar 重算。"""
+    from src.engine import MinuteBacktester
+
+    dates = pd.to_datetime([
+        "2024-01-02 09:31",
+        "2024-01-02 09:32",
+        "2024-01-02 09:33",
+        "2024-01-03 09:31",
+        "2024-01-03 09:32",
+    ])
+    data = {
+        "000001.SZ": pd.DataFrame(
+            {
+                "datetime": dates,
+                "code": "000001.SZ",
+                "open": [10.0, 10.0, 10.0, 5.0, 5.0],
+                "high": [10.0, 10.0, 10.0, 5.0, 5.0],
+                "low": [10.0, 10.0, 10.0, 5.0, 5.0],
+                "close": [10.0, 10.0, 10.0, 5.0, 5.0],
+                "volume": 1e8,
+                "limit_up": [11.0, 11.0, 11.0, 5.5, 5.5],
+                "limit_down": [9.0, 9.0, 9.0, 4.5, 4.5],
+                "is_suspended": False,
+                "adj_factor": 1.0,
+                # 前 3 根 bar 锚点不变 (1.0)，后 2 根除权后锚点变为 2.0：应合并为 2 段/2 次调用。
+                "cum_factor": [1.0, 1.0, 1.0, 2.0, 2.0],
+            }
+        )
+    }
+    calls: list[int] = []
+
+    class Inspect(BaseStrategy):
+        strategy_name = "inspect"
+
+        def generate_signals(self, d):
+            calls.append(len(d["000001.SZ"]))
+            return self.empty_signals(d["000001.SZ"]["datetime"], ["000001.SZ"])
+
+    MinuteBacktester().run(
+        Inspect(),
+        "2024-01-02",
+        "2024-01-03",
+        data=data,
+        trade_data=data,
+        point_in_time_signal_adjust=True,
+    )
+
+    assert calls == [3, 5], "应合并成 2 次调用（前 3 根 bar 一段、后 2 根一段），而非逐 bar 5 次"

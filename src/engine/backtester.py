@@ -319,27 +319,66 @@ class Backtester:
     ) -> pd.DataFrame:
         if not point_in_time_adjust:
             return strategy.generate_signals(data)
-        if len(days) > 500:
-            logger.warning(
-                f"point_in_time_signal_adjust=True 会按每个交易日重算策略信号（约 {len(days)} 次），"
-                "长区间回测可能明显变慢。"
-            )
-        rows: list[pd.Series] = []
-        idx: list[pd.Timestamp] = []
         codes = list(data.keys())
-        for day in days:
-            visible = self._point_in_time_adjust_data(data, day, time_col="date")
+        seg_ends = self._pit_segment_end_marks(data, days, time_col="date")
+        if len(seg_ends) > 200:
+            logger.warning(
+                f"point_in_time_signal_adjust=True 检测到 {len(seg_ends)} 个除权分段，"
+                "仍需按段重算策略信号，除权密集的大股票池/长区间回测可能变慢。"
+            )
+        frames: list[pd.DataFrame] = []
+        start = 0
+        day_index = {d: i for i, d in enumerate(days)}
+        for seg_end in seg_ends:
+            seg_days = days[start : day_index[seg_end] + 1]
+            start = day_index[seg_end] + 1
+            if not seg_days:
+                continue
+            visible = self._point_in_time_adjust_data(data, seg_end, time_col="date")
             if not visible:
                 continue
             sig = strategy.generate_signals(visible)
-            aligned = self._align_signals(sig, [day], codes)
-            rows.append(aligned.iloc[0])
-            idx.append(day)
-        if not rows:
+            frames.append(self._align_signals(sig, seg_days, codes))
+        if not frames:
             return pd.DataFrame(int(Signal.HOLD), index=pd.DatetimeIndex(days), columns=codes, dtype="int64")
-        out = pd.DataFrame(rows, index=pd.DatetimeIndex(idx), columns=codes)
+        out = pd.concat(frames)
         out.index.name = "date"
         return out
+
+    @staticmethod
+    def _pit_segment_end_marks(
+        data: dict[str, pd.DataFrame],
+        marks: list[pd.Timestamp],
+        *,
+        time_col: str,
+    ) -> list[pd.Timestamp]:
+        """把 ``marks``（交易日/分钟时间戳）按各 code 的 ``cum_factor`` 变化点切成锚点不变的分段。
+
+        分段内任意时刻站在段内任一点回看历史，前复权锚点（各 code 各自的 ``cum_factor``）
+        都相同，因此段内只需按段末最后一个时点算一次前复权 + 一次策略调用，段内每个时点
+        直接取该次调用里自己那一行——除权在真实数据里很稀疏，分段数远小于 ``marks`` 长度。
+
+        返回每段的**最后一个** mark（升序），覆盖到 ``marks[-1]``；``marks`` 为空返回空列表。
+        """
+        if not marks:
+            return []
+        mark_index = {m: i for i, m in enumerate(marks)}
+        change_idx: set[int] = set()
+        for df in data.values():
+            if df is None or df.empty or "cum_factor" not in df.columns or time_col not in df.columns:
+                continue
+            d = df[[time_col, "cum_factor"]].dropna().sort_values(time_col)
+            cum = pd.to_numeric(d["cum_factor"], errors="coerce").to_numpy(dtype="float64")
+            ts = pd.to_datetime(d[time_col]).to_numpy()
+            for j in range(1, len(cum)):
+                if ExecutionEngine.detect_ex_factor_ratio(cum[j - 1], cum[j]) > 1.001:
+                    idx = mark_index.get(pd.Timestamp(ts[j]))
+                    if idx is not None and idx > 0:
+                        change_idx.add(idx)
+        ends = sorted(marks[i - 1] for i in change_idx)
+        if not ends or ends[-1] != marks[-1]:
+            ends.append(marks[-1])
+        return ends
 
     @staticmethod
     def _point_in_time_adjust_data(
