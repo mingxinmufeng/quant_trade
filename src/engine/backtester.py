@@ -178,7 +178,12 @@ class Backtester:
             codes: data 为 None 时，要回测的股票池。
             benchmark: 基准日收盘 Series（index=date）；None 时基准指标为 0。
             point_in_time_signal_adjust: True 时，策略按每个历史信号日的 cum_factor 对此前价格做前复权，
-                避免用未来复权因子生成历史信号。
+                避免用未来复权因子生成历史信号。**性能**：内部按 cum_factor 变化点分段、每段只调用
+                一次 ``strategy.generate_signals``（而非逐日调用），要求策略严格遵守
+                :class:`~src.strategy.base.BaseStrategy` 的因果契约——返回的信号矩阵里任意一行
+                只能依赖 ``<=`` 该行日期的数据（:class:`MaRsiStrategy` 等内置示例均如此实现）。
+                若策略违反该契约（例如只对传入数据的最后一行出信号、或用整个传入窗口做全局统计
+                量并套用到每一行），分段内非段末的日期会静默看到"未来"行，产生错误信号且不报错。
 
         Returns:
             :class:`BacktestResult`。
@@ -371,7 +376,10 @@ class Backtester:
             cum = pd.to_numeric(d["cum_factor"], errors="coerce").to_numpy(dtype="float64")
             ts = pd.to_datetime(d[time_col]).to_numpy()
             for j in range(1, len(cum)):
-                if ExecutionEngine.detect_ex_factor_ratio(cum[j - 1], cum[j]) > 1.001:
+                p, c = cum[j - 1], cum[j]
+                if p != p or c != c:  # NaN：因子缺失不构成分段边界
+                    continue
+                if not np.isclose(p, c, rtol=1e-9, atol=1e-12):
                     idx = mark_index.get(pd.Timestamp(ts[j]))
                     if idx is not None and idx > 0:
                         change_idx.add(idx)

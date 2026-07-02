@@ -358,6 +358,60 @@ def test_point_in_time_signal_adjust_batches_by_corporate_action_segment():
     assert calls == [3, 5], "应合并成 2 次调用（前 3 天一段、后 2 天一段），而非逐日 5 次"
 
 
+def test_pit_segment_boundary_catches_tiny_cum_factor_change():
+    """分段边界须按 cum_factor 数值本身是否变化判定，不能借用除权持仓调整的重要性阈值（>1.001）。
+
+    极小额现金分红导致 cum_factor 变化 <0.1%（低于 ExecutionEngine.detect_ex_factor_ratio
+    的除权持仓调整阈值）——如果分段逻辑误用该阈值会漏切，后续几天会用错误（过期）的锚点
+    前复权，价格量级悄悄失真。
+    """
+    from src.engine import Backtester
+    from src.strategy.base import BaseStrategy
+
+    dates = pd.bdate_range("2024-01-02", periods=3)
+    tiny_factor = 1.0005  # 相对变化 0.05% < 1.001 阈值，但锚点确实变了
+    data = {
+        "000001.SZ": pd.DataFrame(
+            {
+                "date": dates,
+                "open": [10.0, 10.0, 10.0],
+                "high": [10.0, 10.0, 10.0],
+                "low": [10.0, 10.0, 10.0],
+                "close": [10.0, 10.0, 10.0],
+                "volume": 1e6,
+                "is_suspended": False,
+                "adj_factor": 1.0,
+                "cum_factor": [1.0, tiny_factor, tiny_factor],
+            }
+        )
+    }
+    calls: list[list[float]] = []  # 每次调用里看到的 D0 那一行收盘价（该次调用可见的最早一行）
+
+    class Inspect(BaseStrategy):
+        strategy_name = "inspect"
+
+        def generate_signals(self, d):
+            calls.append(d["000001.SZ"]["close"].tolist())
+            return self.empty_signals(d["000001.SZ"]["date"], ["000001.SZ"])
+
+    Backtester(config={"backtest": {"initial_capital": 1_000_000}}).run(
+        Inspect(),
+        dates[0].date(),
+        dates[-1].date(),
+        data=data,
+        trade_data=data,
+        point_in_time_signal_adjust=True,
+    )
+
+    # 若阈值漏切（复用 >1.001 除权持仓调整阈值），D1/D2 会被误并入 D0 那一段，
+    # 只产生 1 次调用；正确实现应按数值变化切出 2 段：[D0] 和 [D1, D2]。
+    assert len(calls) == 2, f"tiny_factor={tiny_factor} 的变化应触发分段，实际只有 {len(calls)} 次调用"
+    assert calls[0] == [10.0]  # D0 自成一段，锚点=1.0，不缩放
+    # D1/D2 一段，锚点=tiny_factor：段内可见的 D0/D1/D2 均按该锚点重新前复权。
+    expected_d0_in_seg2 = 10.0 / tiny_factor
+    assert calls[1] == pytest.approx([expected_d0_in_seg2, 10.0, 10.0])
+
+
 def test_benchmark_beta_date_aligned_partial_coverage():
     """P1-1：基准不覆盖回测起点时，beta 须按日期对齐而非按位置。
 

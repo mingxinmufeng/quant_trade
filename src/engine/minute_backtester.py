@@ -136,6 +136,10 @@ class MinuteBacktester:
             trade_data: 交易/估值口径分钟数据，应为 none raw；None 时沿用 data 兼容旧接口。
             codes: data 为 None 时要回测的股票池。
             benchmark: 暂未支持分钟基准对比，alpha/beta 记 0。
+            point_in_time_signal_adjust: True 时按 cum_factor 变化点分段、每段只调用一次
+                ``strategy.generate_signals``（而非逐 bar 调用），要求策略严格遵守
+                :class:`~src.strategy.base.BaseStrategy` 的因果契约，语义同
+                :meth:`~src.engine.backtester.Backtester.run` 对应参数。
 
         Returns:
             :class:`~src.engine.backtester.BacktestResult`。
