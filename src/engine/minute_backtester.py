@@ -141,11 +141,13 @@ class MinuteBacktester:
             :class:`~src.engine.backtester.BacktestResult`。
         """
         s, e = parse_date(start), parse_date(end)
+        auto_loaded_raw_signal = False
         if data is None:
             if self.apply_corporate_actions or point_in_time_signal_adjust:
                 data = self.load_trade_data(codes, s, e)
                 if trade_data is None:
                     trade_data = data
+                auto_loaded_raw_signal = self.apply_corporate_actions and not point_in_time_signal_adjust
             else:
                 data = self._load_data(codes, s, e)
         signal_data = self._prepare_data(data, s, e)
@@ -161,6 +163,11 @@ class MinuteBacktester:
         if len(timeline) < 2:
             logger.warning("可用 bar 不足 2 根，返回空结果")
             return self._empty_result()
+        if auto_loaded_raw_signal:
+            logger.warning(
+                "MinuteBacktester 自动加载了 none raw 分钟数据作为信号口径，但 "
+                "point_in_time_signal_adjust=False；策略信号可能受除权跳空影响。"
+            )
 
         # 全程信号矩阵（因果），对齐到时间轴与 code（用上一根 bar 信号撮合 → 强制一 bar 滞后）
         signals = self._generate_signals(strategy, signal_data, timeline, point_in_time_signal_adjust)
@@ -303,6 +310,11 @@ class MinuteBacktester:
     ) -> pd.DataFrame:
         if not point_in_time_adjust:
             return strategy.generate_signals(data)
+        if len(timeline) > 5_000:
+            logger.warning(
+                f"point_in_time_signal_adjust=True 会按每根分钟 bar 重算策略信号（约 {len(timeline)} 次），"
+                "分钟级长区间回测可能非常慢。"
+            )
         rows: list[pd.Series] = []
         idx: list[pd.Timestamp] = []
         codes = list(data.keys())

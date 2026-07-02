@@ -184,9 +184,11 @@ class Backtester:
             :class:`BacktestResult`。
         """
         s, e = parse_date(start), parse_date(end)
+        auto_loaded_raw_signal = False
         if data is None:
             load_adjust = "none" if point_in_time_signal_adjust or self.apply_corporate_actions else "hfq"
             data = self._load_data(codes, s, e, adjust=load_adjust)
+            auto_loaded_raw_signal = load_adjust == "none" and not point_in_time_signal_adjust
         signal_data = self._prepare_data(data, s, e)
         trade_data = self._prepare_data(trade_data, s, e) if trade_data is not None else signal_data
         if not signal_data or not trade_data:
@@ -199,6 +201,11 @@ class Backtester:
         if len(trading_days) < 2:
             logger.warning("可用交易日不足 2 天，返回空结果")
             return self._empty_result()
+        if auto_loaded_raw_signal:
+            logger.warning(
+                "run() 自动加载了 none raw 数据作为信号口径，但 point_in_time_signal_adjust=False；"
+                "策略信号可能受除权跳空影响。建议传入独立 signal data，或启用历史时点前复权。"
+            )
 
         # 全程信号矩阵（因果），用上一交易日信号驱动当日撮合（T+1）
         signals = self._generate_signals(strategy, signal_data, trading_days, point_in_time_signal_adjust)
@@ -312,6 +319,11 @@ class Backtester:
     ) -> pd.DataFrame:
         if not point_in_time_adjust:
             return strategy.generate_signals(data)
+        if len(days) > 500:
+            logger.warning(
+                f"point_in_time_signal_adjust=True 会按每个交易日重算策略信号（约 {len(days)} 次），"
+                "长区间回测可能明显变慢。"
+            )
         rows: list[pd.Series] = []
         idx: list[pd.Timestamp] = []
         codes = list(data.keys())
