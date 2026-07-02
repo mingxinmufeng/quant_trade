@@ -47,6 +47,24 @@ def test_datastore_roundtrip_and_none_adjust(tmp_path):
     assert np.allclose(none_df["adj_factor"], 1.0)
 
 
+def test_datastore_none_keeps_cum_factor_for_corporate_actions(tmp_path):
+    """none 价格不缩放，但保留累计因子供回测处理除权持仓调整。"""
+    from src.data import DataStore
+
+    store = DataStore(tmp_path)
+    df = _raw_daily(n=4)
+    store.write_raw("000001.SZ", "daily", df)
+    store.write_factor(
+        "000001.SZ",
+        pd.DataFrame({"date": df["date"], "cum_factor": [1.0, 1.0, 2.0, 2.0]}),
+    )
+
+    got = store.load("000001.SZ", "daily", adjust="none")
+    assert np.allclose(got["close"], df["close"])
+    assert np.allclose(got["adj_factor"], 1.0)
+    assert got["cum_factor"].tolist() == [1.0, 1.0, 2.0, 2.0]
+
+
 def test_datastore_hfq_adjust(tmp_path):
     from src.data import DataStore
 

@@ -360,14 +360,15 @@ class Backtester:
         return out
 
     def _handle_corporate_actions(self, pf, indexed, prev_day, day) -> None:
-        """非复权/前复权模式下，按 adj_factor 变化率对持仓做除权调整。"""
+        """不复权数据下，按累计复权因子变化率对持仓做除权调整。"""
         for code in list(pf.positions.keys()):
             df = indexed.get(code)
             if df is None or day not in df.index or prev_day not in df.index:
                 continue
-            if "adj_factor" not in df.columns:
+            factor_col = "cum_factor" if "cum_factor" in df.columns else "adj_factor"
+            if factor_col not in df.columns:
                 continue
-            ratio = ExecutionEngine.detect_ex_factor_ratio(df.loc[prev_day, "adj_factor"], df.loc[day, "adj_factor"])
+            ratio = ExecutionEngine.detect_ex_factor_ratio(df.loc[prev_day, factor_col], df.loc[day, factor_col])
             if ratio > 1.001:
                 self.execution.apply_corporate_action(pf, code, ratio)
 
