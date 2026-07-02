@@ -209,6 +209,67 @@ def test_apply_corporate_actions_rejects_adjusted_data_without_cum_factor():
         ).run(Flat(), dates[0].date(), dates[-1].date(), data=data)
 
 
+def test_run_uses_signal_data_for_strategy_and_trade_data_for_execution():
+    """双数据口径：策略看复权价，成交股数和成交价使用 raw 价。"""
+    from src.engine import Backtester
+    from src.strategy.base import BaseStrategy, Signal
+
+    dates = pd.bdate_range("2024-01-02", periods=3)
+    signal_data = {
+        "000001.SZ": pd.DataFrame(
+            {
+                "date": dates,
+                "open": [100.0, 100.0, 100.0],
+                "high": [100.0, 100.0, 100.0],
+                "low": [100.0, 100.0, 100.0],
+                "close": [100.0, 100.0, 100.0],
+                "volume": 1e6,
+                "is_suspended": False,
+                "adj_factor": 10.0,
+            }
+        )
+    }
+    trade_data = {
+        "000001.SZ": pd.DataFrame(
+            {
+                "date": dates,
+                "open": [10.0, 10.0, 10.0],
+                "high": [10.0, 10.0, 10.0],
+                "low": [10.0, 10.0, 10.0],
+                "close": [10.0, 10.0, 10.0],
+                "volume": 1e6,
+                "is_suspended": False,
+                "adj_factor": 1.0,
+                "cum_factor": 1.0,
+            }
+        )
+    }
+
+    class BuyIfAdjusted(BaseStrategy):
+        strategy_name = "buy_if_adjusted"
+
+        def generate_signals(self, d):
+            assert float(d["000001.SZ"]["close"].iloc[0]) == 100.0
+            sig = self.empty_signals(d["000001.SZ"]["date"], ["000001.SZ"])
+            sig.iloc[0, 0] = int(Signal.BUY)
+            return self.validate_signals(sig)
+
+    res = Backtester(
+        config={"backtest": {"initial_capital": 1_000_000}},
+        position_size=0.5,
+        apply_corporate_actions=True,
+    ).run(
+        BuyIfAdjusted(),
+        dates[0].date(),
+        dates[-1].date(),
+        data=signal_data,
+        trade_data=trade_data,
+    )
+
+    assert res.daily_positions["000001.SZ"].iloc[1] == 50_000
+    assert abs(res.equity_curve.iloc[1] - 1.0) < 0.001
+
+
 def test_benchmark_beta_date_aligned_partial_coverage():
     """P1-1：基准不覆盖回测起点时，beta 须按日期对齐而非按位置。
 

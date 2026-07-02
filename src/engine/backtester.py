@@ -162,6 +162,7 @@ class Backtester:
         start: str | date | datetime,
         end: str | date | datetime,
         data: dict[str, pd.DataFrame] | None = None,
+        trade_data: dict[str, pd.DataFrame] | None = None,
         codes: Sequence[str] | None = None,
         benchmark: pd.Series | None = None,
     ) -> BacktestResult:
@@ -170,7 +171,8 @@ class Backtester:
         Args:
             strategy: 策略实例。
             start/end: 回测区间（含）。
-            data: 预加载的 ``{code: 日线df}``（含 date 列，建议 hfq）；None 时用 fetcher 拉取。
+            data: 信号口径 ``{code: 日线df}``（含 date 列，建议 hfq/qfq）；None 时用 fetcher 拉取。
+            trade_data: 交易/估值口径 ``{code: 日线df}``，应为不复权 raw；None 时沿用 data 以兼容旧接口。
             codes: data 为 None 时，要回测的股票池。
             benchmark: 基准日收盘 Series（index=date）；None 时基准指标为 0。
 
@@ -180,24 +182,25 @@ class Backtester:
         s, e = parse_date(start), parse_date(end)
         if data is None:
             data = self._load_data(codes, s, e)
-        data = self._prepare_data(data, s, e)
-        if not data:
+        signal_data = self._prepare_data(data, s, e)
+        trade_data = self._prepare_data(trade_data, s, e) if trade_data is not None else signal_data
+        if not signal_data or not trade_data:
             logger.warning("回测数据为空，返回空结果")
             return self._empty_result()
         if self.apply_corporate_actions:
-            self._validate_corporate_action_inputs(data)
+            self._validate_corporate_action_inputs(trade_data)
 
-        trading_days = self._trading_days(data, s, e)
+        trading_days = self._trading_days(trade_data, s, e)
         if len(trading_days) < 2:
             logger.warning("可用交易日不足 2 天，返回空结果")
             return self._empty_result()
 
         # 全程信号矩阵（因果），用上一交易日信号驱动当日撮合（T+1）
-        signals = strategy.generate_signals(data)
-        signals = self._align_signals(signals, trading_days, list(data.keys()))
+        signals = strategy.generate_signals(signal_data)
+        signals = self._align_signals(signals, trading_days, list(trade_data.keys()))
 
         # 每只股票按日期建索引，便于 O(1) 取 bar
-        indexed = {code: df.set_index("date") for code, df in data.items()}
+        indexed = {code: df.set_index("date") for code, df in trade_data.items()}
         # 各股最后一根行情日：用于退市/行情终止后的持仓强制清仓（防幻值）
         last_dt = {code: df.index.max() for code, df in indexed.items() if not df.empty}
         final_day = trading_days[-1]
