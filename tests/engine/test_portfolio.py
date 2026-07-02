@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
 
 def _buy_then_sell(pf):
     """T 日买入 1000@10，次日解冻后卖出 1000@11。返回卖出后的 pf。"""
@@ -47,8 +49,6 @@ def test_share_t1_freeze_independent_of_cash_switch():
 
 def test_buy_insufficient_cash_raises():
     """买入超过可用资金 → ValueError（撮合层应在调用前裁减，这里是账本最后一道防线）。"""
-    import pytest
-
     from src.engine import Portfolio
 
     pf = Portfolio(10_000)
@@ -58,8 +58,6 @@ def test_buy_insufficient_cash_raises():
 
 def test_sell_exceeds_available_raises():
     """卖出超过可卖股数（T+1 冻结未解冻）→ ValueError。"""
-    import pytest
-
     from src.engine import Portfolio
 
     pf = Portfolio(100_000)
@@ -95,3 +93,21 @@ def test_cash_dividend_counts_as_realized_not_cost_offset():
     assert abs(pf.cash - (cash_before + 500.0)) < 1e-9
     assert abs(pf.realized_pnl - 500.0) < 1e-9                     # 计入已实现
     assert pos.avg_cost == avg_before                             # 成本基不变
+
+
+def test_taxable_cash_dividend_withheld_on_sell_by_holding_days():
+    """gbbq 税前分红先全额入账，卖出时按持股天数扣红利税。"""
+    from src.engine import Portfolio
+
+    pf = Portfolio(100_000)
+    pf.buy("000001.SZ", 1000, 10.0, 0.0, date(2024, 1, 2))
+    pf.settle_new_day()
+    pf.add_taxable_cash_dividend("000001.SZ", 0.5, date(2024, 1, 3))
+    cash_after_dividend = pf.cash
+
+    pnl = pf.sell("000001.SZ", 1000, 11.0, 0.0, date(2024, 1, 20))
+
+    assert cash_after_dividend == 90_500.0
+    assert pnl == 900.0  # 卖出价差 1000 - 红利税 500*20%
+    assert pf.cash == 101_400.0
+    assert pf.realized_pnl == 1_400.0  # 税前分红 500 + 卖出 pnl 900

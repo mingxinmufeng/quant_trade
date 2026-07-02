@@ -77,6 +77,16 @@ class Position:
         return (self.last_price - self.avg_cost) * self.shares
 
 
+@dataclass
+class PendingDividend:
+    """已入账、待卖出时按持股期限扣税的税前现金分红。"""
+
+    code: str
+    gross_amount: float
+    shares: int
+    dividend_date: date | datetime
+
+
 class Portfolio:
     """账户：现金 + 持仓 + T+1 冻结 + 估值 + 已实现盈亏。
 
@@ -95,6 +105,8 @@ class Portfolio:
         self.realized_pnl = 0.0
         #: round-trip 成交记录（dict 字段与 backtester.Trade 对齐）
         self.realized_trades: list[dict] = []
+        #: 税前现金分红递延扣税账本：分红先全额入现金，卖出时按持股期限扣红利税。
+        self.pending_dividends: dict[str, list[PendingDividend]] = {}
 
     # ------------------------------------------------------------
     # 资金 / 估值
@@ -184,7 +196,8 @@ class Portfolio:
                 f"[{code}] 可卖不足：拟卖 {shares}，可卖 {pos.available}（持有 {pos.shares}，冻结 {pos.frozen}）"
             )
         price = float(price)
-        proceeds = shares * price - float(commission)
+        dividend_tax = self._withhold_dividend_tax(code, shares, pos, trade_date)
+        proceeds = shares * price - float(commission) - dividend_tax
         cost_basis = pos.avg_cost * shares
         pnl = proceeds - cost_basis
         self.realized_pnl += pnl
@@ -212,6 +225,7 @@ class Portfolio:
         if pos.shares == 0:
             # 清仓：重置成本/建仓日；移除空仓位
             del self.positions[code]
+            self.pending_dividends.pop(code, None)
         return pnl
 
     # ------------------------------------------------------------
@@ -273,6 +287,54 @@ class Portfolio:
         logger.debug(f"[{code}] 现金分红 {amount:.2f}（每股税后 {per_share_after_tax:.4f}）")
         return amount
 
+    def add_taxable_cash_dividend(self, code: str, per_share_gross: float, dividend_date) -> float:
+        """税前现金分红：先全额入现金，卖出时按持股期限递延扣红利税。
+
+        gbbq 的现金分红为税前口径。A 股红利税在卖出时按实际持股期限分档扣缴：
+        持股 <= 1 个月税率 20%，<= 1 年税率 10%，> 1 年免税。这里按当前单仓均价模型，
+        对部分卖出按卖出股数占卖出前持股的比例分摊待扣税分红。
+        """
+        pos = self.positions.get(code)
+        if pos is None or pos.shares <= 0 or per_share_gross <= 0:
+            return 0.0
+        amount = pos.shares * float(per_share_gross)
+        self.cash += amount
+        self.realized_pnl += amount
+        self.pending_dividends.setdefault(code, []).append(
+            PendingDividend(
+                code=code,
+                gross_amount=amount,
+                shares=int(pos.shares),
+                dividend_date=_to_dt(dividend_date),
+            )
+        )
+        logger.debug(f"[{code}] 税前现金分红 {amount:.2f}（每股 {per_share_gross:.4f}），卖出时扣税")
+        return amount
+
+    def _withhold_dividend_tax(self, code: str, sold_shares: int, pos: Position, trade_date) -> float:
+        pending = self.pending_dividends.get(code)
+        if not pending or sold_shares <= 0 or pos.shares <= 0:
+            return 0.0
+        td = _to_dt(trade_date)
+        holding_days = (td - pos.open_date).days if pos.open_date else 0
+        rate = _dividend_tax_rate(holding_days)
+        if rate <= 0:
+            return 0.0
+        sold_ratio = min(1.0, float(sold_shares) / float(pos.shares))
+        tax = 0.0
+        kept: list[PendingDividend] = []
+        for div in pending:
+            taxable = div.gross_amount * sold_ratio
+            tax += taxable * rate
+            div.gross_amount -= taxable
+            div.shares = max(0, int(div.shares * (1.0 - sold_ratio)))
+            if div.gross_amount > _EPS and div.shares > 0:
+                kept.append(div)
+        self.pending_dividends[code] = kept
+        if tax > 0:
+            logger.debug(f"[{code}] 卖出扣缴红利税 {tax:.2f}（持股 {holding_days} 天，税率 {rate:.0%}）")
+        return tax
+
     # ------------------------------------------------------------
     # 快照
     # ------------------------------------------------------------
@@ -308,6 +370,16 @@ def _to_dt(d: str | date | datetime) -> date | datetime:
     import pandas as pd  # 局部导入，避免无谓依赖
 
     return pd.Timestamp(d)
+
+
+def _dividend_tax_rate(holding_days: int) -> float:
+    """A 股个人红利税简化分档：<=30 天 20%，<=365 天 10%，>365 天 0%。"""
+    days = max(0, int(holding_days))
+    if days <= 30:
+        return 0.20
+    if days <= 365:
+        return 0.10
+    return 0.0
 
 
 # ============================================================
