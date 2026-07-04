@@ -139,12 +139,16 @@ class GbbqStore:
     # ------------------------------------------------------------
 
     def _snapshot_valid(self) -> bool:
-        """快照有效 ⇔ 快照存在、源 gbbq 存在，且快照 mtime ≥ 源 mtime。"""
+        """快照有效 ⇔ 快照存在，且（源 gbbq 缺失 或 快照 mtime ≥ 源 mtime）。
+
+        源 gbbq 不存在（本机未装通达信，仅同步了数据仓库的拉取副本）时，快照是唯一
+        可用来源且不可能相对"不存在的源"过期，直接视为有效；否则按版本戳判断。
+        """
         if not self._snapshot_path or not self._snapshot_path.exists():
             return False
         src = self.gbbq_file()
         if src is None or not src.exists():
-            return False
+            return True
         return self._snapshot_path.stat().st_mtime >= src.stat().st_mtime
 
     def _read_snapshot(self) -> pd.DataFrame | None:
