@@ -285,6 +285,8 @@ def read_gbbq(path: str) -> pd.DataFrame:
     if len(content) < 4:
         return pd.DataFrame(columns=list(GBBQ_COLUMNS))
     (count,) = struct.unpack("<I", content[:4])
+    if len(content) < 4 + count * _GBBQ_RECORD_SIZE:
+        return pd.DataFrame(columns=list(GBBQ_COLUMNS))
     k = _gbbq_key_u32()
     k0, k44 = k[0], k[0x44 >> 2]
     # 四张子表在 u32 列表中的基址（字节偏移 // 4）

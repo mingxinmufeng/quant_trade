@@ -80,6 +80,18 @@ def test_compute_event_before_first_close_skipped():
     assert len(out) == 1  # 仅基准行
 
 
+def test_compute_future_event_after_raw_end_skipped():
+    """gbbq 可能含已公告的未来除权日；原始行情未覆盖前不应写入因子表。"""
+    raw = _raw(["2026-07-01", "2026-07-02"], [10.0, 10.0])
+    events = pd.DataFrame({
+        "date": pd.to_datetime(["2026-07-06"]),
+        "fenhong": [1.0], "peijia": [0.0], "song": [0.0], "pei": [0.0],
+    })
+    out = FactorCalculator._compute(raw, events)
+    assert len(out) == 1
+    assert out["date"].max() == pd.Timestamp("2026-07-01")
+
+
 def test_compute_empty_raw():
     out = FactorCalculator._compute(None, pd.DataFrame())
     assert out.empty
@@ -249,6 +261,22 @@ def test_snapshot_save_and_roundtrip(tmp_path):
     ev = gs2.events("000001.SZ")
     assert len(ev) == 1
     assert ev["fenhong"].iloc[0] == pytest.approx(10.0)
+
+
+def test_snapshot_only_store_is_available_and_loads(tmp_path):
+    """无通达信源文件但有 gbbq_events.parquet 时，快照就是可用数据源。"""
+    snap = tmp_path / "gbbq_events.parquet"
+    _gbbq_df([
+        (0, "000001", "2024-01-03", 1, 0.0, 0.0, 10.0, 0.0),
+    ]).to_parquet(snap, index=False)
+
+    gs = GbbqStore(tdx_path="__nonexistent__", snapshot_path=snap)
+
+    assert gs.available is True
+    ev = gs.events("000001.SZ")
+    assert len(ev) == 1
+    assert ev["song"].iloc[0] == pytest.approx(10.0)
+    assert gs._loaded_from_snapshot is True
 
 
 def test_snapshot_noop_without_path():

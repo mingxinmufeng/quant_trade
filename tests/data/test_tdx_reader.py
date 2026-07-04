@@ -56,6 +56,17 @@ def test_stock_volume_coefficient_is_shares():
     assert tdx_reader.SECURITY_COEFFICIENT["SH_A_STOCK"][0] == 0.01
 
 
+def test_read_gbbq_truncated_file_returns_empty(tmp_path):
+    """损坏/截断的 gbbq 文件应返回空表，而不是抛 struct 解包异常。"""
+    fp = tmp_path / "gbbq"
+    fp.write_bytes((1).to_bytes(4, "little") + b"\x00" * 10)
+
+    df = tdx_reader.read_gbbq(str(fp))
+
+    assert list(df.columns) == list(tdx_reader.GBBQ_COLUMNS)
+    assert df.empty
+
+
 # ============================================================
 # golden：需本地 vipdoc
 # ============================================================

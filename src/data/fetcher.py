@@ -430,6 +430,11 @@ class DataFetcher:
         if gbbq or self._factor_source == "gbbq":
             if not self._gbbq.available:
                 return False
+            raw = self._store.read_raw(code, "daily")
+            if raw is not None and not raw.empty and "date" in raw.columns:
+                raw_max = pd.to_datetime(raw["date"], errors="coerce").max()
+                if pd.notna(raw_max) and stored_max > raw_max:
+                    return False
             try:
                 # 优先走预热缓存（O(1)），缓存未建时回退逐股查询
                 if self._gbbq_event_cache:

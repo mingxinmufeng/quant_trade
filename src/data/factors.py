@@ -240,6 +240,7 @@ class FactorCalculator:
             return empty
 
         closes = r.set_index("date")["close"]
+        raw_max_date = pd.Timestamp(r["date"].iloc[-1]).normalize()
         # 基准行：最早一日 cum_factor = 1.0
         rows = [(r["date"].iloc[0], 1.0)]
         cum = 1.0
@@ -248,6 +249,8 @@ class FactorCalculator:
             ev = events.sort_values("date")
             for _, row in ev.iterrows():
                 d = pd.Timestamp(row["date"]).normalize()
+                if d > raw_max_date:
+                    continue  # gbbq may contain announced future events; wait until raw prices cover D
                 prior = closes[closes.index < d]
                 if prior.empty:
                     continue  # 除权日早于本地最早行情，无前收可用，跳过

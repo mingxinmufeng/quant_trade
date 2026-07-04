@@ -33,9 +33,9 @@ gbbq 二进制结构（解密+解析见 ``src.data.sources.tdx_reader.read_gbbq`
       f1 = 前流通股   f2 = 前总股本   f3 = 后流通股   f4 = 后总股本
 
   即字段名 ``songgu_qianzongguben`` 实为**后流通股**、``peigu_houzongguben`` 实为
-  **后总股本**。category 5 逐期（季报 + 各类上市/回购事件）快照股本结构，由此可得
-  任意历史时点的真实股本，用于**点位市值 / 换手率**（防幸存者偏差，严禁用今值股本
-  倒推历史），见 :meth:`GbbqStore.shares`。
+  **后总股本**。实测 category 5 不是可靠的定期/事件驱动完整记录，部分股票存在多年
+  断档；只能作为股本重建的基底快照，并应结合 category 1 送转/配股事件与快照年龄
+  诊断使用，见 :meth:`GbbqStore.shares`。
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ from .sources.tdx_reader import read_gbbq
 #: gbbq 类别：除权除息（唯一影响复权的类别）
 GBBQ_CATEGORY_EXDIV = 1
 
-#: gbbq 类别：股本变化（逐期后流通股/后总股本快照，不影响复权）
+#: gbbq 类别：股本变化（后流通股/后总股本快照；实测有断档，不影响复权）
 GBBQ_CATEGORY_SHARECHANGE = 5
 
 #: 标准代码后缀 → gbbq market 编码
@@ -105,7 +105,11 @@ class GbbqStore:
 
     @property
     def available(self) -> bool:
-        """gbbq 文件是否存在（不触发解析）。"""
+        """gbbq 数据是否可用（源文件存在，或已有事件快照；不触发解析）。"""
+        if self._loaded and self._df is not None and not self._df.empty:
+            return True
+        if self._snapshot_path and self._snapshot_path.exists():
+            return True
         f = self.gbbq_file()
         return f is not None and f.exists()
 
@@ -312,10 +316,15 @@ class GbbqStore:
         后总股本**（单位：万股，与通达信「权息股本」口径一致）；按 ``date`` 升序、去重、
         仅保留总股本为正的快照。无记录返回空表。
 
+        注意：category 5 实测存在多年断档，并不等价于完整股本事件流。直接按旧快照
+        长期前向填充会污染点位市值 / 换手率；研究代码应结合除权除息事件重建，并记录
+        基底快照年龄等质量标签。
+
         注意 gbbq 字段名沿用除权除息语义，在 category 5 下 ``songgu_qianzongguben`` 实为
         **后流通股**、``peigu_houzongguben`` 实为**后总股本**（详见模块 docstring）。
 
-        点位市值 / 换手率即由此计算（防幸存者偏差，严禁用今值股本倒推历史）::
+        若快照质量可接受，点位市值 / 换手率可按下式计算（防幸存者偏差，严禁用今值
+        股本倒推历史）::
 
             总市值   = 不复权收盘价 × total_shares × 1e4
             流通市值 = 不复权收盘价 × float_shares × 1e4

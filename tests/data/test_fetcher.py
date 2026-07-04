@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 def _raw_daily(code="000001.SZ", n=10):
@@ -355,6 +356,28 @@ def test_datastore_gbbq_preferred_with_external_fallback(tmp_path):
     assert np.allclose(hfq_b["close"].to_numpy()[5:], raw_b["close"].to_numpy()[5:] * 2.0), "无 gbbq 应回退外部因子(×2)"
 
 
+def test_datastore_qfq_default_anchor_ignores_future_factor(tmp_path):
+    """qfq 默认锚点应取数据末日，不能被因子表中的未来公告事件平移历史价格。"""
+    from src.data import DataStore
+
+    store = DataStore(tmp_path)
+    raw = _raw_daily("000001.SZ", n=2)
+    raw["date"] = pd.to_datetime(["2026-07-01", "2026-07-02"])
+    store.write_raw("000001.SZ", "daily", raw)
+    store.write_factor(
+        "000001.SZ",
+        pd.DataFrame({
+            "date": pd.to_datetime(["2026-07-01", "2026-07-02", "2026-07-06"]),
+            "cum_factor": [1.0, 2.0, 4.0],
+        }),
+        gbbq=True,
+    )
+
+    qfq = store.load("000001.SZ", "daily", adjust="qfq", use_gbbq=True)
+
+    assert qfq["close"].iloc[-1] == pytest.approx(raw["close"].iloc[-1])
+
+
 # ============================================================
 # _post_process_daily：零成交但有价 ≠ 停牌（P0-4）
 # ============================================================
@@ -449,6 +472,57 @@ def test_should_skip_factor_gbbq_source_needs_gbbq_file(tmp_path):
     f._store.write_factor("600000.SH", pd.DataFrame({"date": raw["date"], "cum_factor": [1.0] * 5}))
     assert not f._gbbq.available
     assert f._should_skip_factor("600000.SH", gbbq=False) is False
+
+
+def test_gbbq_snapshot_only_prewarms_event_cache(tmp_path):
+    """无通达信源文件但有 gbbq_events.parquet 时，DataFetcher 应使用快照预热事件缓存。"""
+    from src.data.fetcher import DataFetcher
+
+    pd.DataFrame({
+        "market": [1],
+        "code": ["600519"],
+        "date": pd.to_datetime(["2025-06-20"]),
+        "category": [1],
+        "hongli_panqianliutong": [38.0],
+        "peigujia_qianzongguben": [0.0],
+        "songgu_qianzongguben": [0.0],
+        "peigu_houzongguben": [0.0],
+    }).to_parquet(tmp_path / "gbbq_events.parquet", index=False)
+
+    f = DataFetcher(store_path=tmp_path, tdx_path="__nonexistent__", suspend_enabled=False)
+
+    assert f._gbbq.available is True
+    f._prewarm_gbbq_event_cache()
+    assert f._gbbq_event_cache["600519.SH"] == pd.Timestamp("2025-06-20")
+
+
+def test_should_skip_factor_gbbq_future_factor_forces_rebuild(tmp_path):
+    """已有 gbbq 因子若超出 raw 覆盖末日，说明含未来事件，应强制重算清理。"""
+    from src.data.fetcher import DataFetcher
+
+    pd.DataFrame({
+        "market": [0],
+        "code": ["000001"],
+        "date": pd.to_datetime(["2026-07-06"]),
+        "category": [1],
+        "hongli_panqianliutong": [1.0],
+        "peigujia_qianzongguben": [0.0],
+        "songgu_qianzongguben": [0.0],
+        "peigu_houzongguben": [0.0],
+    }).to_parquet(tmp_path / "gbbq_events.parquet", index=False)
+
+    f = DataFetcher(store_path=tmp_path, tdx_path="__nonexistent__", suspend_enabled=False)
+    raw = _raw_daily("000001.SZ", n=2)
+    raw["date"] = pd.to_datetime(["2026-07-01", "2026-07-02"])
+    f._store.write_raw("000001.SZ", "daily", raw)
+    f._store.write_factor(
+        "000001.SZ",
+        pd.DataFrame({"date": pd.to_datetime(["2026-07-01", "2026-07-06"]), "cum_factor": [1.0, 1.01]}),
+        gbbq=True,
+    )
+
+    assert f._gbbq.available is True
+    assert f._should_skip_factor("000001.SZ", gbbq=True) is False
 
 
 # ============================================================

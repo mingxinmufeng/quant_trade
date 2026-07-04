@@ -272,7 +272,10 @@ class DataStore:
         if mode == "hfq":
             return hfq
         if mode == "qfq":
-            anchor_f = cum_factor_at(self._effective_factor(code, use_gbbq), anchor_date)
+            effective_anchor = anchor_date
+            if effective_anchor is None and not hfq.empty and tc in hfq.columns:
+                effective_anchor = pd.to_datetime(hfq[tc]).max()
+            anchor_f = cum_factor_at(self._effective_factor(code, use_gbbq), effective_anchor)
             if not anchor_f or anchor_f == 1.0:
                 return hfq
             out = hfq.copy()
