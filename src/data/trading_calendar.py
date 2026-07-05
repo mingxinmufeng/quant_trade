@@ -1,8 +1,11 @@
 """
 A 股交易日历
 ============
-基于 akshare `tool_trade_date_hist_sina()` 拉取 1990-01 至当前年末的所有交易日，
-并落盘到 ``data_store/calendar.parquet`` 作为离线缓存。
+拉取 1990-12 至当前年末的所有交易日（含未来已公布日历），落盘到
+``data_store/calendar.parquet`` 作为离线缓存。
+
+回源双源容灾：tushare ``trade_cal``（官方交易所日历，需 ``TUSHARE_TOKEN``）主源
+→ akshare ``tool_trade_date_hist_sina()``（免 token）兜底；无 token 自动走兜底。
 
 特性：
 - 优先读本地 parquet；缓存过期或缺失才回源
@@ -162,16 +165,46 @@ class TradingCalendar:
 
     @retry(max_attempts=_RETRY_TIMES, delays=_RETRY_DELAYS)
     def _fetch_remote(self) -> pd.Series:
-        """
-        从 akshare 拉取交易日历。
+        """交易日历回源：tushare ``trade_cal``（官方，需 token）主源 → akshare 新浪兜底。
+
+        两源已经过交叉验证（``scripts/cross_validate_sources.py``：2005 至今零差异，
+        未来已公布日历天数一致）。无 token / 单源失败自动落到下一源。
 
         Returns:
             pd.Series of date-like values（日期列）。
-
-        Note:
-            akshare 的 ``tool_trade_date_hist_sina()`` 返回 DataFrame，
-            列名为 ``trade_date``，类型为 datetime.date。
         """
+        errors: list[str] = []
+        for fetch in (self._fetch_tushare, self._fetch_akshare):
+            try:
+                s = fetch()
+            except Exception as exc:
+                errors.append(f"{fetch.__name__}: {type(exc).__name__}: {exc}")
+                continue
+            if s is not None and len(s):
+                return s
+            errors.append(f"{fetch.__name__}: 返回空")
+        raise RuntimeError("全部日历源失败: " + " | ".join(errors))
+
+    def _fetch_tushare(self) -> pd.Series:
+        """tushare 官方交易所日历（SSE，1990-12 至当年末，含未来已公布日）。"""
+        # 延迟 import：无 token / 未装 tushare 时由调用方落到下一源
+        from .sources.tushare_pool import TusharePool
+
+        pool = TusharePool()
+        if not pool.available:
+            raise RuntimeError("未配置 TUSHARE_TOKEN")
+        df = pool.call(
+            "trade_cal",
+            exchange="SSE", is_open="1",
+            start_date="19901201", end_date=f"{datetime.now().year}1231",
+            fields="cal_date",
+        )
+        if df is None or df.empty:
+            raise RuntimeError("tushare 返回空日历")
+        return df["cal_date"]
+
+    def _fetch_akshare(self) -> pd.Series:
+        """akshare 新浪日历（免 token 兜底）。"""
         # 延迟 import，避免未联网环境下纯本地缓存测试也强制依赖 akshare
         import akshare as ak
 
