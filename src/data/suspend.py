@@ -8,10 +8,11 @@
 
 源优先级（可配置）
 ------------------
-1. **东方财富**（主源，免 token，akshare ``stock_tfp_em(date=...)``）：
+1. **tushare**（主源，需 ``TUSHARE_TOKEN``，``pro.suspend_d(suspend_type='S', ...)``）：
+   官方口径，按交易日整市场返回全日停牌名单；**每个交易日仅需 1 次调用**，
+   落盘缓存后零重复请求。无 token 时自动落到下一源。
+2. **东方财富**（兜底，免 token，akshare ``stock_tfp_em(date=...)``）：
    数据中心-特色数据-两市停复牌，单次返回指定交易日的停复牌快照。
-2. **tushare**（兜底，需 ``TUSHARE_TOKEN``，``pro.suspend_d(suspend_type='S', ...)``）：
-   按交易日整市场返回全日停牌名单；免费账号限频但**每个交易日仅需 1 次调用**。
 
 设计要点
 --------
@@ -38,8 +39,8 @@ from loguru import logger
 from ..utils.helpers import ensure_dir, format_code
 from .sources.base import _ak_call
 
-#: 默认停牌名单源优先级（东财主源 → tushare 兜底）
-DEFAULT_SUSPEND_SOURCES = ("eastmoney", "tushare")
+#: 默认停牌名单源优先级（tushare 官方主源 → 东财免 token 兜底）
+DEFAULT_SUSPEND_SOURCES = ("tushare", "eastmoney")
 
 #: 默认仅对近 N 天内未缓存的交易日联网拉取（更久远历史回退缺口启发式）
 DEFAULT_SUSPEND_LOOKBACK_DAYS = 30

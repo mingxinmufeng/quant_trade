@@ -14,6 +14,7 @@ from typing import Optional
 
 from .akshare_source import AkshareSource
 from .baostock_source import BaostockSource
+from .daily_basic import load_daily_basic, update_daily_basic
 from .base import (
     DataFetchError,
     DataSourceBase,
@@ -28,8 +29,9 @@ from .pytdx_source import (
 )
 from .tushare_source import TushareSource
 
-#: 默认数据源优先级
-DEFAULT_SOURCES = ("pytdx", "akshare", "baostock", "tushare")
+#: 默认数据源优先级（TDX 本地盘 → tushare 官方 → akshare → baostock；
+#: tushare 无 token 时构建失败，fetcher 的源链会自动跳到下一源）
+DEFAULT_SOURCES = ("pytdx", "tushare", "akshare", "baostock")
 
 
 def build_source(
@@ -61,4 +63,6 @@ __all__ = [
     "_is_proxy_error",
     "_raise_if_proxy_error",
     "build_source",
+    "load_daily_basic",
+    "update_daily_basic",
 ]

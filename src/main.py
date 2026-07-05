@@ -194,6 +194,10 @@ def fetch(
     codes: str | None = typer.Option(None, "--codes", help="空格/逗号分隔股票代码（多值含空格时加引号）；缺省=全市场 akshare 清单"),
     freqs: str = typer.Option("daily,min5,min1", "--freqs", help="空格/逗号分隔周期：daily min5 min1"),
     no_bse: bool = typer.Option(False, "--no-bse", help="全市场清单剔除北交所"),
+    no_daily_basic: bool = typer.Option(
+        False, "--no-daily-basic",
+        help="行情更新后不触发 tushare daily_basic 增量（亦可用配置 data.daily_basic_enabled 关闭）",
+    ),
     throttle: float = typer.Option(0.3, "--throttle", help="每只股票处理完 sleep 秒数（防网络源风控；纯 pytdx 本地源可设 0）"),
     config: str | None = typer.Option(None, "--config", help="配置文件路径"),
     store_path: str | None = typer.Option(None, "--store-path", help="数据仓库根目录（最高优先级覆盖 config/环境变量；缺省按配置链解析）"),
@@ -224,6 +228,21 @@ def fetch(
     logger.info(f"开始更新 | 股票={len(code_list)} | 周期={freq_list}")
     fetcher.update(codes=code_list, freqs=freq_list, throttle=throttle)
     logger.info("数据更新完成")
+
+    # 每日指标增量（tushare daily_basic）：无 token / 权限不足内部自动跳过，不影响行情结果
+    if not no_daily_basic and bool(cfg.data.get("daily_basic_enabled", True)):
+        from .data.sources.daily_basic import DEFAULT_START, update_daily_basic
+
+        update_daily_basic(
+            cfg.data.store_path,
+            start=str(cfg.data.get("daily_basic_start", DEFAULT_START)),
+        )
+
+    # gbbq/profile 补充表刷新（tushare dividend/namechange 补退市股洞）：同样自动退化
+    if bool(cfg.data.get("tushare_supplement_enabled", True)):
+        from .data.sources.tushare_meta import update_tushare_supplements
+
+        update_tushare_supplements(cfg.data.store_path)
 
 
 # ============================================================

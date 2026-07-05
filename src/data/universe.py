@@ -568,6 +568,9 @@ class Universe:
             self._profile = ProfileStore(
                 tdx_path=self._tdx_path,
                 snapshot_path=self._store_path / PROFILE_SNAPSHOT_FILE,
+                # tushare 补充更名表按股票兜底（退市股 profile.dat 覆盖率 0%，
+                # 否则其点位名退化为带"退"的当前名、历史被 ST 过滤整段误杀）
+                supplement_path=self._store_path / "profile_names_tushare.parquet",
             )
         return self._profile
 

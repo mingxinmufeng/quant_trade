@@ -67,13 +67,17 @@ DOT_SEP = "."
 DEFAULT_CONFIG: dict[str, Any] = {
     "data": {
         "store_path": "data_store",
-        "sources": ["pytdx", "akshare", "baostock", "tushare"],
-        "factor_source": "sina",
+        "sources": ["pytdx", "tushare", "akshare", "baostock"],
+        "factor_source": "tushare",     # 外部因子源；无 TUSHARE_TOKEN 时 fetcher 自动降级 sina
         "load_factor_source": "gbbq",   # 加载复权口径：gbbq=自算优先(全覆盖,回测推荐) | active=仅外部源
         "factor_selfheal_window": 30,
-        "suspend_sources": ["eastmoney", "tushare"],
+        "suspend_sources": ["tushare", "eastmoney"],
         "suspend_lookback_days": 30,
         "suspend_enabled": True,
+        "daily_basic_enabled": True,        # fetch 后自动增量 tushare daily_basic（无 token/权限自动跳过）
+        "daily_basic_start": "20140101",    # daily_basic 回填起点
+        "tushare_supplement_enabled": True, # fetch 后刷新 gbbq/profile 补充表（补退市股洞；无 token 自动跳过）
+
         "tdx_path": "",
         "request_timeout": 15,
         "stock_timeout": 60,

@@ -86,10 +86,24 @@ class GbbqStore:
         self,
         tdx_path: str | None = None,
         snapshot_path: str | Path | None = None,
+        supplement_path: str | Path | None = None,
     ) -> None:
+        """
+        Args:
+            tdx_path: 通达信安装目录；留空则自动寻径。
+            snapshot_path: 事件快照 parquet 路径（TDX 解析结果的落盘缓存）。
+            supplement_path: **tushare 补充事件表** parquet 路径（由
+                ``sources.tushare_meta.refresh_dividend_supplement`` 生成，
+                schema 同 ``events()`` 输出外加 ``code`` 列）。按股票合并：
+                TDX 有记录的股票用 TDX（权威，含配股）；TDX 无记录的股票
+                （实测退市股仅 11% 覆盖）用补充表兜底（分红/送转，无配股）。
+        """
         self._tdx_path = (tdx_path or "").strip() or _auto_discover_tdx_path()
         self._snapshot_path = Path(snapshot_path) if snapshot_path else None
+        self._supplement_path = Path(supplement_path) if supplement_path else None
         self._df: pd.DataFrame | None = None
+        self._supp_df: pd.DataFrame | None = None
+        self._supp_loaded = False
         self._loaded = False
         self._loaded_from_snapshot = False
         self._lock = threading.Lock()
@@ -261,14 +275,17 @@ class GbbqStore:
         """返回某股全部**除权除息**事件 ``DataFrame[date, fenhong, peijia, song, pei]``。
 
         字段均为「每 10 股」原始口径（未除以 10）；按 ``date`` 升序、去重。无事件返回空表。
+
+        按股票合并补充源：TDX（gbbq/快照）该股**无任何记录**时，回退 tushare 补充事件表
+        （``supplement_path``，主要覆盖被通达信清除的退市股；仅分红/送转，无配股）。
         """
         self._load()
         empty = pd.DataFrame(columns=list(EVENT_COLUMNS))
-        if self._df is None or self._df.empty:
-            return empty
         std = format_code(code)
         if "." not in std:
             return empty
+        if self._df is None or self._df.empty:
+            return self._supplement_events(std, empty)
         num, suffix = std.split(".")
         market = _MARKET_BY_SUFFIX.get(suffix)
         if market is None:
@@ -280,7 +297,7 @@ class GbbqStore:
             & (self._df["category"] == GBBQ_CATEGORY_EXDIV)
         ]
         if sub.empty:
-            return empty
+            return self._supplement_events(std, empty)
         out = sub.rename(
             columns={
                 "hongli_panqianliutong": "fenhong",
@@ -292,6 +309,41 @@ class GbbqStore:
         for c in ("fenhong", "peijia", "song", "pei"):
             out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0)
         out["date"] = pd.to_datetime(out["date"]).dt.normalize()
+        return (
+            out.drop_duplicates(subset=["date"], keep="last")
+            .sort_values("date")
+            .reset_index(drop=True)
+        )
+
+    def _load_supplement(self) -> pd.DataFrame | None:
+        """懒读 tushare 补充事件表（无文件/读失败返回 None，静默兜底为"无补充"）。"""
+        if self._supp_loaded:
+            return self._supp_df
+        with self._lock:
+            if self._supp_loaded:
+                return self._supp_df
+            self._supp_loaded = True
+            if self._supplement_path and self._supplement_path.exists():
+                try:
+                    df = pd.read_parquet(self._supplement_path)
+                    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+                    self._supp_df = df
+                    logger.debug(
+                        f"gbbq tushare 补充事件表已加载: {len(df)} 行 | {self._supplement_path}"
+                    )
+                except Exception as exc:
+                    logger.warning(f"读取 gbbq 补充事件表失败（忽略补充源）: {exc}")
+        return self._supp_df
+
+    def _supplement_events(self, std: str, empty: pd.DataFrame) -> pd.DataFrame:
+        """从补充表取某股事件（schema 已与 events() 输出一致）；无则返回空表。"""
+        supp = self._load_supplement()
+        if supp is None or supp.empty:
+            return empty
+        sub = supp[supp["code"] == std]
+        if sub.empty:
+            return empty
+        out = sub[list(EVENT_COLUMNS)].copy()
         return (
             out.drop_duplicates(subset=["date"], keep="last")
             .sort_values("date")

@@ -11,7 +11,8 @@ A 股行情拉取器（多源容灾 + 多周期 + 增量更新 + 原始/因子�
    - ``{store}/daily|min5|min1/{code}.parquet`` 存**不复权** OHLCV + 涨跌停/停牌等元数据；
    - ``{store}/factors/{code}.parquet`` 存 ``date→cum_factor``，每次覆盖刷新；
    - 因此**不再需要因子自愈**：原始价永不被改写，因子表直接刷新即可。
-3. **拉取优先级**：``pytdx``（通达信本地盘）→ ``akshare`` → ``baostock`` → ``tushare``。
+3. **拉取优先级**：``pytdx``（通达信本地盘）→ ``tushare``（官方，需 token；缺 token
+   自动从源链剔除）→ ``akshare`` → ``baostock``。
    各源仅返回不复权 OHLCV（见 ``src.data.sources``）。
 4. **增量更新**：日线 / 5 分钟 / 1 分钟三套原始周期；其余周期 load 时 resample。
 5. **多线程**：``update`` 按股票并行（``max_workers``）；baostock 等非线程安全源已加锁。
@@ -69,6 +70,7 @@ from .sources import (
     _ak_call,
     build_source,
 )
+from .sources.tushare_pool import get_tushare_tokens
 from .storage import (  # 重导出，保持向后兼容
     DAILY_COLUMNS,
     FREQ_DIRS,
@@ -173,7 +175,7 @@ class DataFetcher:
         calendar: TradingCalendar | None = None,
         tdx_path: str | None = None,
         jitter: float = 0.3,
-        factor_source: str = "sina",
+        factor_source: str = "tushare",
         max_workers: int = DEFAULT_MAX_WORKERS,
         factor_skip_via_gbbq: bool = True,
         load_factor_source: str = "gbbq",
@@ -186,7 +188,12 @@ class DataFetcher:
 
         self._store = DataStore(store_path)
         self._store_path = Path(store_path)
-        self._source_names = tuple(sources)
+        # 无 TUSHARE_TOKEN 时把 tushare 从源链一次性剔除（否则每只股票都构建失败刷警告）
+        source_names = tuple(sources)
+        if "tushare" in source_names and not get_tushare_tokens():
+            logger.warning("未配置 TUSHARE_TOKEN，源链中的 tushare 已禁用（其余源兜底）")
+            source_names = tuple(n for n in source_names if n != "tushare")
+        self._source_names = source_names
         self._retry_times = int(retry_times)
         self._retry_delays = list(retry_delays)
         self._calendar = calendar or TradingCalendar(store_path=self._store_path)
@@ -196,18 +203,27 @@ class DataFetcher:
         if selfheal_window is not None:
             logger.debug("selfheal_window 参数已废弃（原始/因子分离后无需自愈），忽略")
         self._sources_cache: dict[str, DataSourceBase | None] = {}
-        # 本地 gbbq（权息）：自算因子的数据来源、因子刷新触发器；事件快照落盘到 store 根下
+        # 本地 gbbq（权息）：自算因子的数据来源、因子刷新触发器；事件快照落盘到 store 根下。
+        # tushare 补充事件表按股票兜底（TDX 会清除退市股记录，见 sources.tushare_meta）
         self._gbbq = GbbqStore(
             tdx_path=self._tdx_path,
             snapshot_path=self._store_path / "gbbq_events.parquet",
+            supplement_path=self._store_path / "gbbq_events_tushare.parquet",
         )
-        # 本地 profile（更名史）：点位证券简称 / ST 判定来源；更名快照落盘到 store 根下
+        # 本地 profile（更名史）：点位证券简称 / ST 判定来源；更名快照落盘到 store 根下。
+        # tushare 补充更名表按股票兜底（退市股 profile.dat 覆盖率 0%）
         self._profile = ProfileStore(
             tdx_path=self._tdx_path,
             snapshot_path=self._store_path / "profile_names.parquet",
+            supplement_path=self._store_path / "profile_names_tushare.parquet",
         )
         self._factor_skip_via_gbbq = bool(factor_skip_via_gbbq)
-        self._factor_source = (factor_source or "sina").strip().lower()
+        self._factor_source = (factor_source or "tushare").strip().lower()
+        # 外部因子源默认 tushare（官方 adj_factor）；无 token 降级 sina（免 token），
+        # 保证单源锁定语义下无 token 用户仍有可用外部因子源
+        if self._factor_source == "tushare" and not get_tushare_tokens():
+            logger.warning("factor_source=tushare 但未配置 TUSHARE_TOKEN，外部因子源降级为 sina")
+            self._factor_source = "sina"
         # gbbq 自算因子引擎：始终构建（即便默认走外部源，也并存落盘 factors_gbbq/ 供对比）
         self._gbbq_calc = FactorCalculator(
             self._gbbq, raw_close_loader=lambda c: self._store.read_raw(c, "daily"),
@@ -225,7 +241,7 @@ class DataFetcher:
         # 避免外部源(sina/tushare)早期因子缺失导致的 align_cum_factor bfill 早段绝对价失真
         # （P1-7）。换代码股 gbbq 按当前代码归并、记录完整（见 gbbq.events 实测注释），无副作用。
         self._load_factor_source = (load_factor_source or "gbbq").strip().lower()
-        # 停牌名单 provider（东财主源 + tushare 兜底，按交易日落盘缓存）：
+        # 停牌名单 provider（tushare 主源 + 东财兜底，按交易日落盘缓存）：
         # 增量更新时权威判定停牌，替代"OHLCV 缺口反推"的二义性
         self._suspend = SuspendProvider(
             store_path=self._store_path,

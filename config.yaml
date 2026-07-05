@@ -15,15 +15,22 @@ data:
   store_path: "data_store"              # 数据仓库根目录（parquet）。**每台机器自选**：勿改本行，改用
                                         # --store-path / QUANT_DATA__STORE_PATH / config.private.yaml 覆盖（见 config.private.yaml.example）。
                                         # 缺省 "data_store" 相对运行目录；建议设绝对路径(SSD、非云同步盘)。
-  sources: ["pytdx", "akshare", "baostock", "tushare"]  # 数据源优先级；前者失败自动 fallback 到下一个
-  factor_source: "sina"                 # 复权因子主源（固定单源，保证因子刻度一致）；可选 sina/tushare/em。不参与价格源 fallback
+  sources: ["pytdx", "tushare", "akshare", "baostock"]  # 数据源优先级；前者失败自动 fallback 到下一个（tushare 需 TUSHARE_TOKEN，缺 token 自动从链中剔除）
+  factor_source: "tushare"              # 复权因子主源（固定单源，保证因子刻度一致）；可选 tushare/sina/em。tushare 需 token，无 token 自动降级 sina。不参与价格源 fallback
   load_factor_source: "gbbq"            # 加载复权口径：gbbq=自算因子优先(全history覆盖,回测推荐) | active=仅用外部源 factors/
   # 重构后：原始价与因子分离落盘，复权在 load 时按需合成（adjust=none/hfq/qfq），不再需要因子自愈
   factor_selfheal_window: 30            # [已废弃] 保留仅为兼容旧脚本；新架构无自愈，本值被忽略
   # 停牌名单（按交易日整市场快照）：增量更新时权威判定停牌，替代"OHLCV 缺口反推"二义性
-  suspend_sources: ["eastmoney", "tushare"]  # 优先级：东财(免token, ak.stock_tfp_em) → tushare(suspend_d, 需token, 限频但每日仅1调用)
+  suspend_sources: ["tushare", "eastmoney"]  # 优先级：tushare(suspend_d, 官方口径, 需token, 每日仅1调用) → 东财(免token, ak.stock_tfp_em)
   suspend_lookback_days: 30             # 仅对近 N 天内未缓存交易日联网拉取；更久远历史回退缺口启发式（避免首拉海量请求）
   suspend_enabled: true                 # 是否启用权威停牌名单；false 则纯靠缺口反推
+  # 每日指标（tushare daily_basic，逐日 PIT 股本/换手率/估值，需约 2000 积分）：
+  # fetch 行情更新完成后自动增量；无 token / 权限不足自动跳过，不影响行情更新
+  daily_basic_enabled: true             # 关掉则 fetch 不再触发 daily_basic 增量
+  daily_basic_start: "20140101"         # 回填起点（断点续传，重复运行只补缺）
+  # gbbq/profile 补充表（tushare dividend/namechange）：通达信会清除退市股的除权与更名记录，
+  # 补充表按股票兜底，修复退市股复权因子与点位 ST 判定（防幸存者偏差）；无 token 自动跳过
+  tushare_supplement_enabled: true
   tdx_path: ""                          # 通达信安装目录（含 vipdoc）；留空则自动寻径，可在 config.private.yaml 里覆盖
   index_codes: ["000300.SH", "000905.SH", "000016.SH"]  # 随全市场一并采集的指数（基准/对冲用）；pytdx 本地可读，回测离线取基准
   request_timeout: 15                   # 单次 HTTP 请求超时（秒）

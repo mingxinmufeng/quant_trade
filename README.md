@@ -94,8 +94,8 @@ stocks = universe.get_tradable_stocks("2024-01-01")
 
 ### 第三步：同步行情数据（日线 / 5 分钟 / 1 分钟）
 
-**拉取优先级**：`pytdx`（通达信本地盘）→ `akshare` → `baostock` → `tushare`。
-增量更新**优先 akshare**，且 akshare 内部二次容灾（东财 → 新浪 → 腾讯）。
+**拉取优先级**：`pytdx`（通达信本地盘）→ `tushare`（官方接口，需 `TUSHARE_TOKEN`，
+缺 token 自动从源链剔除）→ `akshare`（内部二次容灾：东财 → 新浪 → 腾讯）→ `baostock`。
 
 落盘只保留三套原始周期：`data_store/daily`、`data_store/min5`、`data_store/min1`。
 其余周期**按需在加载时生成、不落盘**：
@@ -328,12 +328,15 @@ class MyStrategy(BaseStrategy):
 │   │   ├── resample.py             # 周期重采样（日→周/月；5min→15/30/60min）
 │   │   ├── suspend.py              # 停牌名单 Provider（整市场交易日快照）
 │   │   ├── storage.py              # 本地 Parquet 数据仓库读写
-│   │   └── sources/                # 数据源适配器（统一返回不复权 OHLCV）
-│   │       ├── base.py             #   DataSourceBase 抽象基类
+│   │   └── sources/                # 数据源适配器与外部资源拉取
+│   │       ├── base.py             #   DataSourceBase 抽象基类（不复权 OHLCV）
 │   │       ├── pytdx_source.py     #   通达信本地盘（首选，零风控）
+│   │       ├── tushare_source.py   #   tushare 行情源（次选，需 token）
 │   │       ├── akshare_source.py   #   akshare（东财/新浪/腾讯二次容灾）
-│   │       ├── baostock_source.py  #   baostock（备用）
-│   │       └── tushare_source.py   #   tushare（备用，需 token）
+│   │       ├── baostock_source.py  #   baostock（兜底）
+│   │       ├── tushare_pool.py     #   tushare 多账号 token 池（限流轮换）
+│   │       ├── daily_basic.py      #   每日指标（逐日 PIT 股本/换手/估值；fetch 后自动增量）
+│   │       └── tushare_meta.py     #   除权/更名补充表（补通达信清除的退市股记录）
 │   │
 │   ├── factor/                     # 因子层
 │   │   ├── base.py                 # FactorBase 抽象基类
@@ -369,6 +372,7 @@ class MyStrategy(BaseStrategy):
 │   └── test_data_integrity.py      # 本地 data_store 完整性扫描（脚本 + pytest 双用）
 │
 ├── scripts/                        # 运维 / 数据工具脚本
+│   └── cross_validate_sources.py   # 多源交叉验证（日历/因子/除权/更名/停牌/退市 逐项对比出报告）
 ├── data_store/                     # 本地数据仓库（Git 忽略）
 └── logs/                           # 运行日志（Git 忽略）
 ```

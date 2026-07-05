@@ -73,9 +73,21 @@ class ProfileStore:
         self,
         tdx_path: str | None = None,
         snapshot_path: str | Path | None = None,
+        supplement_path: str | Path | None = None,
     ) -> None:
+        """
+        Args:
+            tdx_path: 通达信安装目录；留空则自动寻径。
+            snapshot_path: 更名表快照 parquet 路径（TDX 解析结果的落盘缓存）。
+            supplement_path: **tushare 补充更名表** parquet 路径（由
+                ``sources.tushare_meta.refresh_namechange_supplement`` 生成，
+                schema 同 ``PROFILE_COLUMNS``）。按股票合并：profile.dat 有记录的
+                股票用 TDX；无记录的股票（实测退市股覆盖率 0%，其点位名会整段退化
+                为"当前名近似"且当前名带"退"→ 历史被误判剔除）用补充表兜底。
+        """
         self._tdx_path = (tdx_path or "").strip() or _auto_discover_tdx_path()
         self._snapshot_path = Path(snapshot_path) if snapshot_path else None
+        self._supplement_path = Path(supplement_path) if supplement_path else None
         self._df: pd.DataFrame | None = None
         self._hist: dict[str, list[tuple[pd.Timestamp, str]]] | None = None
         self._loaded = False
@@ -204,23 +216,51 @@ class ProfileStore:
     # ------------------------------------------------------------
 
     def _history(self) -> dict[str, list[tuple[pd.Timestamp, str]]]:
-        """``{std_code: [(更名日, 原名称), ...]}``（按更名日升序）。进程内构建一次。"""
+        """``{std_code: [(更名日, 原名称), ...]}``（按更名日升序）。进程内构建一次。
+
+        按股票合并补充源：profile.dat（含快照）里**无记录**的股票，采用 tushare
+        补充更名表（``supplement_path``）的记录（主要覆盖被通达信清除的退市股）。
+        """
         self._load()
         if self._hist is not None:
             return self._hist
         h: dict[str, list[tuple[pd.Timestamp, str]]] = {}
-        if self._df is not None and not self._df.empty:
-            ordered = self._df.sort_values("change_date")
+
+        def _merge_frame(df: pd.DataFrame | None, keep_existing: bool) -> None:
+            if df is None or df.empty:
+                return
+            ordered = df.sort_values("change_date")
             for code, grp in ordered.groupby("code"):
-                h[str(code)] = list(
+                code = str(code)
+                if keep_existing and code in h:
+                    continue  # TDX 有记录的股票以 TDX 为准
+                h[code] = list(
                     zip(
                         pd.to_datetime(grp["change_date"]),
                         grp["name"].astype(str),
                         strict=True,
                     )
                 )
+
+        _merge_frame(self._df, keep_existing=False)
+        _merge_frame(self._load_supplement(), keep_existing=True)
         self._hist = h
         return h
+
+    def _load_supplement(self) -> pd.DataFrame | None:
+        """懒读 tushare 补充更名表（无文件/读失败返回 None，静默视为无补充）。"""
+        if not self._supplement_path or not self._supplement_path.exists():
+            return None
+        try:
+            df = pd.read_parquet(self._supplement_path)
+            df["change_date"] = pd.to_datetime(df["change_date"])
+            logger.debug(
+                f"profile tushare 补充更名表已加载: {len(df)} 行 | {self._supplement_path}"
+            )
+            return df
+        except Exception as exc:
+            logger.warning(f"读取 profile 补充更名表失败（忽略补充源）: {exc}")
+            return None
 
     def former_names(self, code: str) -> pd.DataFrame:
         """某股全部曾用名 ``DataFrame[change_date, name]``（按更名日升序）；无则空表。"""
