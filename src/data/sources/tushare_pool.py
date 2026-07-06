@@ -168,6 +168,12 @@ class TusharePool:
     def call_throttled(self, method: str, **kwargs) -> pd.DataFrame:
         """``call`` 的批量取数包装：主动节流；全池限频则等待再重试；权限错误归类。
 
+        节流语义（**按 token 独立额度叠加**，刻意设计）：槽位预约发生在**逻辑调用**
+        入口，一次调用内 ``call`` 的 token 轮换重试**不**再各自预约——轮换打的是
+        **不同 token**（tushare 限频按 token 计，各自独立配额），且 ``call`` 记住
+        可用账号、后续调用直接从它开始，故任何单个 token 收到的请求都经过全局
+        节流间隔，不会超频；轮换瞬间的跨 token 连发正是多账号池的额度叠加价值。
+
         Returns:
             该接口返回的 DataFrame（``None`` 归一为空表）。
 
