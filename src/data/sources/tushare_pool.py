@@ -98,7 +98,9 @@ class TusharePool:
         self._throttle_seconds = max(0.0, float(throttle_seconds))
         self._ratelimit_sleep = max(0.0, float(ratelimit_sleep))
         self._ratelimit_rounds = max(1, int(ratelimit_rounds))
-        self._last_request = 0.0
+        # 节流用"槽位预约"：多线程并发（如全市场因子刷新的线程池）下也保证全局请求间隔
+        self._throttle_lock = threading.Lock()
+        self._next_slot = 0.0
 
     @property
     def available(self) -> bool:
@@ -153,7 +155,13 @@ class TusharePool:
     # ------------------------------------------------------------
 
     def _throttle(self) -> None:
-        wait = self._throttle_seconds - (time.monotonic() - self._last_request)
+        """预约下一个请求槽位并等待到点（线程安全：锁内只做槽位记账，锁外睡眠）。"""
+        if self._throttle_seconds <= 0:
+            return
+        with self._throttle_lock:
+            now = time.monotonic()
+            wait = self._next_slot - now
+            self._next_slot = max(now, self._next_slot) + self._throttle_seconds
         if wait > 0:
             time.sleep(wait)
 
@@ -173,7 +181,6 @@ class TusharePool:
             try:
                 df = self.call(method, **kwargs)
             except Exception as exc:
-                self._last_request = time.monotonic()
                 if is_permission(exc):
                     raise TusharePermissionError(str(exc)) from exc
                 if not is_ratelimit(exc):
@@ -185,7 +192,6 @@ class TusharePool:
                     )
                     time.sleep(self._ratelimit_sleep)
                 continue
-            self._last_request = time.monotonic()
             return df if df is not None else pd.DataFrame()
         assert last_exc is not None
         raise last_exc

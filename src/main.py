@@ -225,11 +225,21 @@ def fetch(
             code_list = list(dict.fromkeys([*code_list, *idx]))
             logger.info(f"并入指数 {idx}")
 
+    # gbbq/profile 补充表刷新（tushare dividend/namechange 补退市股洞）：**前置**于行情
+    # 更新——update 过程中的点位 ST 限幅判定与 gbbq 自算因子读的是 GbbqStore/ProfileStore
+    # 懒加载的补充表，前置刷新使本次 fetch 即可用最新补洞数据（无 token/权限自动跳过）。
+    # 本次 update 才新增的代码（如新退市股）留到下轮补，属可接受滞后。
+    if bool(cfg.data.get("tushare_supplement_enabled", True)):
+        from .data.sources.tushare_meta import update_tushare_supplements
+
+        update_tushare_supplements(cfg.data.store_path)
+
     logger.info(f"开始更新 | 股票={len(code_list)} | 周期={freq_list}")
     fetcher.update(codes=code_list, freqs=freq_list, throttle=throttle)
     logger.info("数据更新完成")
 
-    # 每日指标增量（tushare daily_basic）：无 token / 权限不足内部自动跳过，不影响行情结果
+    # 每日指标增量（tushare daily_basic，收盘后数据故后置）：无 token / 权限不足内部
+    # 自动跳过，不影响行情结果
     if not no_daily_basic and bool(cfg.data.get("daily_basic_enabled", True)):
         from .data.sources.daily_basic import DEFAULT_START, update_daily_basic
 
@@ -237,12 +247,6 @@ def fetch(
             cfg.data.store_path,
             start=str(cfg.data.get("daily_basic_start", DEFAULT_START)),
         )
-
-    # gbbq/profile 补充表刷新（tushare dividend/namechange 补退市股洞）：同样自动退化
-    if bool(cfg.data.get("tushare_supplement_enabled", True)):
-        from .data.sources.tushare_meta import update_tushare_supplements
-
-        update_tushare_supplements(cfg.data.store_path)
 
 
 # ============================================================

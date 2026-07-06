@@ -50,6 +50,7 @@ class FactorProvider:
         self._cache: dict[str, pd.DataFrame] = {}
         self._jitter = max(0.0, float(jitter))
         self._pool = None  # tushare 多账号 token 池（lazy）
+        self._ts_denied = False  # tushare 权限不足：一次性短路，避免全市场逐股重复告警
         self._source = (source or "sina").strip().lower()
         # 多线程：每只股票一把锁，保证同一代码只拉取一次因子（避免并发重复请求）
         self._lock = threading.Lock()
@@ -126,6 +127,8 @@ class FactorProvider:
         return df[["date", "cum_factor"]].dropna()
 
     def _from_tushare(self, code: str) -> pd.DataFrame:
+        if self._ts_denied:
+            return pd.DataFrame()
         if self._pool is None:
             with self._lock:
                 if self._pool is None:
@@ -133,7 +136,14 @@ class FactorProvider:
                     self._pool = TusharePool()
         if not self._pool.available:
             return pd.DataFrame()
-        df = self._pool.call("adj_factor", ts_code=code)
+        from .sources.tushare_pool import TusharePermissionError
+        try:
+            # call_throttled：全局节流（多线程全市场刷新也不超频）+ 限频等待重试
+            df = self._pool.call_throttled("adj_factor", ts_code=code)
+        except TusharePermissionError as exc:
+            logger.warning(f"tushare 账号无 adj_factor 权限，本轮外部因子刷新整体跳过: {exc}")
+            self._ts_denied = True
+            return pd.DataFrame()
         if df is None or df.empty:
             return pd.DataFrame()
         df["date"] = pd.to_datetime(df["trade_date"]).dt.normalize().astype("datetime64[ns]")

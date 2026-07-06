@@ -142,3 +142,19 @@ def test_call_paged_concatenates(monkeypatch):
     monkeypatch.setattr(pool, "call", fake_call)
     df = pool.call_paged("namechange", page_size=3)
     assert len(df) == 5  # 3 + 2（第二页不足页大小即停）
+
+
+def test_call_throttled_slot_reservation(monkeypatch):
+    """节流按槽位预约：同一时刻的连续请求依次排队等待，间隔 = throttle_seconds。"""
+    import pandas as pd
+
+    pool = tp.TusharePool(["t1"], throttle_seconds=10)
+    sleeps: list[float] = []
+    monkeypatch.setattr(tp.time, "monotonic", lambda: 100.0)  # 冻结时钟
+    monkeypatch.setattr(tp.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(pool, "call", lambda m, **kw: pd.DataFrame({"x": [1]}))
+
+    pool.call_throttled("a")  # 首个请求不等待
+    pool.call_throttled("a")  # 第 2 个等 10s
+    pool.call_throttled("a")  # 第 3 个等 20s（槽位累积，多线程并发同理）
+    assert sleeps == [10.0, 20.0]
