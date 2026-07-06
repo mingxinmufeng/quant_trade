@@ -70,3 +70,75 @@ def test_pool_unavailable():
     assert not pool.available
     with pytest.raises(RuntimeError):
         pool.call("daily")
+
+
+# ------------------------------------------------------------
+# call_throttled / call_paged（数据域模块的标准通道）
+# ------------------------------------------------------------
+
+def _pool_no_wait():
+    """零节流、零限频等待的池（sleep 行为单独用 monkeypatch 断言）。"""
+    return tp.TusharePool(["t1"], throttle_seconds=0, ratelimit_sleep=0)
+
+
+def test_call_throttled_permission_classified(monkeypatch):
+    pool = _pool_no_wait()
+    monkeypatch.setattr(pool, "call", lambda m, **kw: (_ for _ in ()).throw(
+        RuntimeError("抱歉，您没有访问该接口的权限")))
+    with pytest.raises(tp.TusharePermissionError):
+        pool.call_throttled("daily_basic", trade_date="20240102")
+
+
+def test_call_throttled_ratelimit_retries_then_succeeds(monkeypatch):
+    import pandas as pd
+
+    pool = tp.TusharePool(["t1"], throttle_seconds=0, ratelimit_sleep=65)
+    sleeps: list[float] = []
+    monkeypatch.setattr(tp.time, "sleep", lambda s: sleeps.append(s))
+    attempts = []
+
+    def fake_call(method, **kw):
+        attempts.append(method)
+        if len(attempts) == 1:
+            raise RuntimeError("抱歉，您每分钟最多访问该接口200次")
+        return pd.DataFrame({"x": [1]})
+
+    monkeypatch.setattr(pool, "call", fake_call)
+    df = pool.call_throttled("trade_cal")
+    assert len(df) == 1 and len(attempts) == 2
+    assert 65 in sleeps  # 全池限频后按 ratelimit_sleep 等待
+
+
+def test_call_throttled_ratelimit_exhausts(monkeypatch):
+    pool = tp.TusharePool(["t1"], throttle_seconds=0, ratelimit_sleep=0, ratelimit_rounds=2)
+    monkeypatch.setattr(tp.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pool, "call", lambda m, **kw: (_ for _ in ()).throw(
+        RuntimeError("频率超限")))
+    with pytest.raises(RuntimeError, match="频率超限"):
+        pool.call_throttled("trade_cal")
+
+
+def test_call_throttled_other_errors_raise_and_none_normalized(monkeypatch):
+    pool = _pool_no_wait()
+    monkeypatch.setattr(pool, "call", lambda m, **kw: (_ for _ in ()).throw(
+        ValueError("参数错误")))
+    with pytest.raises(ValueError):
+        pool.call_throttled("trade_cal")
+
+    monkeypatch.setattr(pool, "call", lambda m, **kw: None)
+    assert pool.call_throttled("trade_cal").empty  # None 归一为空表
+
+
+def test_call_paged_concatenates(monkeypatch):
+    import pandas as pd
+
+    pool = _pool_no_wait()
+    pages = [pd.DataFrame({"i": range(3)}), pd.DataFrame({"i": range(2)})]
+
+    def fake_call(method, **kw):
+        assert kw["limit"] == 3
+        return pages[kw["offset"] // 3]
+
+    monkeypatch.setattr(pool, "call", fake_call)
+    df = pool.call_paged("namechange", page_size=3)
+    assert len(df) == 5  # 3 + 2（第二页不足页大小即停）

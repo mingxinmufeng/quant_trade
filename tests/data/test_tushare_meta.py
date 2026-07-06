@@ -76,17 +76,19 @@ class FakePool:
         self.raise_exc = raise_exc
         self.calls: list[tuple] = []
 
-    def call(self, method, **kw):
+    def call_throttled(self, method, **kw):
         self.calls.append((method, kw))
         if self.raise_exc is not None:
             raise self.raise_exc
-        if method == "dividend":
-            return self.dividend_map.get(kw["ts_code"], pd.DataFrame())
-        if method == "namechange":
-            if kw.get("offset", 0) > 0:
-                return pd.DataFrame()
-            return self.namechange_df if self.namechange_df is not None else pd.DataFrame()
-        raise AssertionError(method)
+        assert method == "dividend"
+        return self.dividend_map.get(kw["ts_code"], pd.DataFrame())
+
+    def call_paged(self, method, page_size=5000, **kw):
+        self.calls.append((method, kw))
+        if self.raise_exc is not None:
+            raise self.raise_exc
+        assert method == "namechange"
+        return self.namechange_df if self.namechange_df is not None else pd.DataFrame()
 
 
 def _mk_store(tmp_path, daily_codes=(), gbbq_rows=None):
@@ -111,11 +113,6 @@ def _gbbq_snapshot(rows):
             for m, c, d, cat in rows
         ]
     )
-
-
-@pytest.fixture(autouse=True)
-def _no_sleep(monkeypatch):
-    monkeypatch.setattr(tm.time, "sleep", lambda *_: None)
 
 
 def test_refresh_dividend_supplement_targets_gap_codes(tmp_path):
@@ -165,8 +162,8 @@ def test_recompute_gbbq_factors_after_supplement(tmp_path):
 
 def test_refresh_dividend_permission_raises(tmp_path):
     store = _mk_store(tmp_path, daily_codes=["000418.SZ"])
-    pool = FakePool(raise_exc=RuntimeError("抱歉，您没有访问该接口的权限"))
-    with pytest.raises(tm.TushareMetaPermissionError):
+    pool = FakePool(raise_exc=tm.TusharePermissionError("没有访问该接口的权限"))
+    with pytest.raises(tm.TusharePermissionError):
         tm.refresh_dividend_supplement(store, pool)
 
 
@@ -177,7 +174,7 @@ def test_update_tushare_supplements_graceful(tmp_path):
     assert tm.update_tushare_supplements(tmp_path, pool=NoToken()) is False
 
     store = _mk_store(tmp_path, daily_codes=["000418.SZ"])
-    perm = FakePool(raise_exc=RuntimeError("积分不足"))
+    perm = FakePool(raise_exc=tm.TusharePermissionError("积分不足"))
     assert tm.update_tushare_supplements(store, pool=perm) is False  # 降级不抛
 
 

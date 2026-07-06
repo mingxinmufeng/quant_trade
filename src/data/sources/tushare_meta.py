@@ -32,7 +32,7 @@ from pathlib import Path
 import pandas as pd
 from loguru import logger
 
-from .tushare_pool import TusharePool
+from .tushare_pool import TusharePermissionError, TusharePool
 
 #: 补充事件表 / 已检查名单 / 补充更名表 文件名（相对 store 根）
 DIVIDEND_SUPPLEMENT_FILE = "gbbq_events_tushare.parquet"
@@ -42,27 +42,11 @@ NAMECHANGE_SUPPLEMENT_FILE = "profile_names_tushare.parquet"
 #: 补充事件表 schema（与 GbbqStore.events() 输出一致 + code；每 10 股口径）
 SUPPLEMENT_EVENT_COLUMNS = ("code", "date", "fenhong", "peijia", "song", "pei")
 
-#: 逐次请求间隔（秒）
-THROTTLE_SECONDS = 0.35
-
 #: namechange 快照的刷新周期（天）；未过期不重拉
 NAMECHANGE_REFRESH_DAYS = 7
 
 #: namechange 全市场分页步长
 _NC_PAGE = 5000
-
-#: 权限/积分类错误文本特征（命中→整轮放弃，由 update_tushare_supplements 降级）
-_PERMISSION_HINTS = ("权限", "积分")
-
-
-class TushareMetaPermissionError(RuntimeError):
-    """tushare 账号无 dividend/namechange 权限（积分不足）。"""
-
-
-def _classify(exc: Exception) -> Exception:
-    if any(h in str(exc) for h in _PERMISSION_HINTS):
-        return TushareMetaPermissionError(str(exc))
-    return exc
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +123,7 @@ def refresh_dividend_supplement(
     新退市/新增代码下轮自动进入待补集合。
 
     Returns: 本轮**新增了事件**的代码列表（调用方据此重算 gbbq 自算因子）。
-    Raises: TushareMetaPermissionError（账号无权限，调用方整体降级）。
+    Raises: TusharePermissionError（账号无权限，调用方整体降级）。
     """
     store = Path(store)
     todo = codes if codes is not None else _codes_needing_dividend(store)
@@ -155,14 +139,13 @@ def refresh_dividend_supplement(
     n_new = 0
     for i, code in enumerate(todo, 1):
         try:
-            div = pool.call(
+            div = pool.call_throttled(
                 "dividend", ts_code=code,
                 fields="ts_code,end_date,ann_date,div_proc,stk_div,cash_div,cash_div_tax,ex_date",
             )
+        except TusharePermissionError:
+            raise
         except Exception as exc:
-            exc = _classify(exc)
-            if isinstance(exc, TushareMetaPermissionError):
-                raise exc from None
             logger.warning(f"  dividend {code} 拉取失败（下轮重试）: {exc}")
             continue
         ev = dividend_to_events(div)
@@ -174,7 +157,6 @@ def refresh_dividend_supplement(
             new_codes.append(code)
         if i % 100 == 0 or i == len(todo):
             logger.info(f"  dividend 进度 {i}/{len(todo)}（新增事件 {n_new} 行）")
-        time.sleep(THROTTLE_SECONDS)
 
     if n_new:
         merged = pd.concat(frames, ignore_index=True)
@@ -299,7 +281,7 @@ def refresh_namechange_supplement(
     """全市场拉取 tushare ``namechange`` 并转为 profile 口径补充表（mtime 周期刷新）。
 
     Returns: 补充表行数（未到刷新周期时返回 -1 表示跳过）。
-    Raises: TushareMetaPermissionError（账号无权限，调用方整体降级）。
+    Raises: TusharePermissionError（账号无权限，调用方整体降级）。
     """
     store = Path(store)
     out_file = store / NAMECHANGE_SUPPLEMENT_FILE
@@ -309,25 +291,7 @@ def refresh_namechange_supplement(
             logger.debug(f"profile 补充更名表未过期（{age_days:.1f}d ≤ {refresh_days}d），跳过")
             return -1
 
-    frames: list[pd.DataFrame] = []
-    offset = 0
-    while True:
-        try:
-            page = pool.call(
-                "namechange",
-                fields="ts_code,name,start_date",
-                limit=_NC_PAGE, offset=offset,
-            )
-        except Exception as exc:
-            raise _classify(exc) from None
-        if page is None or page.empty:
-            break
-        frames.append(page)
-        if len(page) < _NC_PAGE:
-            break
-        offset += len(page)
-        time.sleep(THROTTLE_SECONDS)
-    nc = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    nc = pool.call_paged("namechange", page_size=_NC_PAGE, fields="ts_code,name,start_date")
     prof = namechange_to_profile(nc, _load_delist_dates(store))
     if prof.empty:
         logger.warning("tushare namechange 返回空，补充更名表未更新")
@@ -356,7 +320,7 @@ def update_tushare_supplements(store: str | Path, pool=None) -> bool:
             recompute_gbbq_factors(store, new_codes)
         refresh_namechange_supplement(store, pool)
         return True
-    except TushareMetaPermissionError as exc:
+    except TusharePermissionError as exc:
         logger.warning(f"tushare 账号无 dividend/namechange 权限，跳过补充表刷新: {exc}")
         return False
     except Exception as exc:

@@ -31,14 +31,13 @@ gbbq cat5 股本快照存在多年断档（见 ``gbbq.py``），本数据可提�
 
 from __future__ import annotations
 
-import time
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 from loguru import logger
 
-from .tushare_pool import TusharePool
+from .tushare_pool import TusharePermissionError, TusharePool
 
 #: 默认回填起点（配置键 ``data.daily_basic_start`` 可覆盖）
 DEFAULT_START = "20140101"
@@ -46,61 +45,14 @@ DEFAULT_START = "20140101"
 #: 单交易日行数下限：低于视为脏数据不落盘（全市场 2014 年已 >2000 只；0 行=拉取失败）
 MIN_ROWS_OK = 1000
 
-#: 两次请求最小间隔（秒），~170 次/分钟，留出 2000 积分档限频余量
-THROTTLE_SECONDS = 0.35
-
-#: 限频时的等待秒数与最大重试轮数（TusharePool 已先做多账号轮换，这里是全池限频后的等待）
-RATELIMIT_SLEEP = 65
-MAX_RATELIMIT_ROUNDS = 3
-
 #: 连续失败超过该数即中止本轮（token 失效/断网时避免对每个交易日重复报错）
 MAX_CONSECUTIVE_FAILURES = 5
-
-#: 限频类错误文本特征（与 tushare_pool 一致；命中→等待重试而非失败）
-_RATELIMIT_HINTS = ("频率超限", "每分钟", "每小时", "次/分", "次/小时", "抱歉，您")
-
-#: 权限/积分类错误文本特征（命中→整轮直接放弃，属"账号级"而非"请求级"问题）
-_PERMISSION_HINTS = ("权限", "积分")
-
-
-class DailyBasicPermissionError(RuntimeError):
-    """tushare 账号无 daily_basic 权限（积分不足）。"""
-
-
-def _is_ratelimit(exc: Exception) -> bool:
-    s = str(exc)
-    return any(h in s for h in _RATELIMIT_HINTS)
-
-
-def _is_permission(exc: Exception) -> bool:
-    s = str(exc)
-    return any(h in s for h in _PERMISSION_HINTS)
-
-
-def _call_with_ratelimit_retry(pool, method: str, **kwargs) -> pd.DataFrame:
-    """经 pool 调用接口：限频则等待重试（pool 内部已先轮换账号），权限错误归类上抛。"""
-    last_exc: Exception | None = None
-    for round_no in range(MAX_RATELIMIT_ROUNDS):
-        try:
-            df = pool.call(method, **kwargs)
-            return df if df is not None else pd.DataFrame()
-        except Exception as exc:
-            if _is_permission(exc):
-                raise DailyBasicPermissionError(str(exc)) from exc
-            if not _is_ratelimit(exc):
-                raise
-            last_exc = exc
-            if round_no < MAX_RATELIMIT_ROUNDS - 1:
-                logger.warning(f"tushare 限频（{method}），等待 {RATELIMIT_SLEEP}s 重试")
-                time.sleep(RATELIMIT_SLEEP)
-    assert last_exc is not None
-    raise last_exc
 
 
 def trade_dates(pool, start: str, end: str) -> list[str]:
     """交易日清单（YYYYMMDD 升序），来自 tushare trade_cal。"""
-    df = _call_with_ratelimit_retry(
-        pool, "trade_cal",
+    df = pool.call_throttled(
+        "trade_cal",
         exchange="SSE", is_open="1", start_date=start, end_date=end,
         fields="cal_date",
     )
@@ -134,7 +86,7 @@ def run_backfill(
         统计 {"fetched": 成功天数, "skipped": 跳过天数, "failed": 失败天数}。
 
     Raises:
-        DailyBasicPermissionError: 账号无权限（积分不足），调用方据此整体降级。
+        TusharePermissionError: 账号无权限（积分不足），调用方据此整体降级。
     """
     end = end or date.today().strftime("%Y%m%d")
     by_date = Path(store) / "daily_basic" / "by_date"
@@ -153,8 +105,8 @@ def run_backfill(
     consecutive_failures = 0
     for i, d in enumerate(todo, 1):
         try:
-            df = _call_with_ratelimit_retry(pool, "daily_basic", trade_date=d)
-        except DailyBasicPermissionError:
+            df = pool.call_throttled("daily_basic", trade_date=d)
+        except TusharePermissionError:
             raise
         except Exception as exc:
             stats["failed"] += 1
@@ -176,7 +128,6 @@ def run_backfill(
         touched_years.add(d[:4])
         if i % 200 == 0 or i == len(todo):
             logger.info(f"  daily_basic 进度 {i}/{len(todo)}（最新 {d}，{len(df)} 行）")
-        time.sleep(THROTTLE_SECONDS)
 
     if touched_years:
         compact_years(Path(store), touched_years)
@@ -203,7 +154,7 @@ def update_daily_basic(
     try:
         run_backfill(store, pool, start=start, end=end)
         return True
-    except DailyBasicPermissionError as exc:
+    except TusharePermissionError as exc:
         logger.warning(f"tushare 账号无 daily_basic 权限（约需 2000 积分），跳过: {exc}")
         return False
     except Exception as exc:
