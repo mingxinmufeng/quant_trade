@@ -1,11 +1,25 @@
 """
-数据源子包（只负责拉取**不复权 OHLCV**）。
+数据源子包：源通道 + 外部资源拉取
+==================================
+
+**架构分层约定（新增数据一律照此）**：
+
+1. 源通道（每个供应商一个文件，只管"怎么调这个源"，零业务语义）：
+   ``tushare_pool``（token 池/节流/限频重试/权限归类/翻页）、``base._ak_call``
+   （akshare 代理错误处理）。
+2. 数据域（每类数据一个模块，拥有 schema/落盘/源优先级与 fallback/合并语义）：
+   OHLCV 行情 = 本包各 ``*_source.py`` 适配器 + ``build_source`` 工厂 + 优先级链；
+   其余数据域在 ``src/data/`` 下各自成模块（calendar/suspend/factors/gbbq/profile），
+   或本包内（``daily_basic``/``tushare_meta``）；源细节写成域内小函数
+   （如 ``FactorProvider._from_sina/_from_tushare``），通道一律经第 1 层。
+3. 消费方（fetcher/universe/engine）只说数据域的语言，不直接碰任何源。
 
 公开：
     DataSourceBase / DataFetchError / ProxyConfigError
     PytdxLocalSource / AkshareSource / BaostockSource / TushareSource
     build_source(name, ...) 工厂
     DEFAULT_SOURCES 默认优先级
+    load_daily_basic / update_daily_basic 每日指标
 """
 
 from __future__ import annotations
