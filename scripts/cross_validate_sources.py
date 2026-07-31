@@ -17,15 +17,19 @@
     NO_PROXY=* python scripts/cross_validate_sources.py                    # 默认样本股
     NO_PROXY=* python scripts/cross_validate_sources.py --codes "600519.SH 000001.SZ"
     NO_PROXY=* python scripts/cross_validate_sources.py --checks factor,exdiv
+    NO_PROXY=* python scripts/cross_validate_sources.py --checks delist \
+        --codes 000418.SZ --basic-info-store /data/basic
     NO_PROXY=* python scripts/cross_validate_sources.py --out reports/xxx.md
 
 token 从 .env / 环境变量取（TUSHARE_TOKEN*，同框架约定）；无 token 时仅跑不需要
-tushare 的对比并给出提示。退出码：发现"疑似问题级"差异 → 1，否则 0。
+tushare 的对比并给出提示。退出码：发现"疑似问题级"差异 → 1，外部源或必要
+本地输入不可用 → 2，否则 0。
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 import tempfile
 import time
@@ -35,13 +39,13 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from src.data.gbbq import GbbqStore  # noqa: E402
-from src.data.profile import ProfileStore  # noqa: E402
-from src.data.sources.tushare_pool import TusharePool  # noqa: E402
-from src.data.suspend import SuspendProvider  # noqa: E402
-from src.data.universe import is_st_name  # noqa: E402
-from src.utils.config_loader import load_config  # noqa: E402
-from src.utils.helpers import format_code  # noqa: E402
+from src.data.gbbq import GbbqStore
+from src.data.profile import ProfileStore
+from src.data.sources.tushare_pool import TusharePool
+from src.data.suspend import SuspendProvider
+from src.data.universe import is_st_name
+from src.utils.config_loader import load_config
+from src.utils.helpers import format_code
 
 #: 默认样本：主板/创业板/科创板/北交所、高分红、多次更名、有配股史、已退市
 DEFAULT_CODES = [
@@ -75,6 +79,7 @@ class Report:
     def __init__(self) -> None:
         self.lines: list[str] = []
         self.issues = 0
+        self.unavailable_count = 0
 
     def section(self, title: str) -> None:
         print(f"\n{'=' * 60}\n{title}\n{'=' * 60}")
@@ -88,6 +93,12 @@ class Report:
         self.issues += 1
         print(f"[疑似问题] {msg}")
         self.lines.append(f"**[疑似问题]** {msg}")
+
+    def unavailable(self, msg: str) -> None:
+        """记录无法形成双源判定；调用方必须 fail-closed，不能视作通过。"""
+        self.unavailable_count += 1
+        print(f"[不可用] {msg}")
+        self.lines.append(f"**[不可用]** {msg}")
 
     def save(self, out: Path) -> None:
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -296,7 +307,7 @@ def check_rename(store: Path, profile: ProfileStore, pool: TusharePool | None,
     cur_names: dict[str, str] = {}
     if basic_file.exists():
         sb = pd.read_parquet(basic_file)
-        cur_names = dict(zip(sb["ts_code"], sb["name"]))
+        cur_names = dict(zip(sb["ts_code"], sb["name"], strict=True))
     month_ends = pd.date_range("2000-01-31", pd.Timestamp.today(), freq="ME")
     n_cmp = n_diff = 0
     for code in codes:
@@ -309,7 +320,7 @@ def check_rename(store: Path, profile: ProfileStore, pool: TusharePool | None,
         nc["start"] = pd.to_datetime(nc["start_date"].astype(str))
         nc = nc.sort_values("start").reset_index(drop=True)
 
-        def ts_name_at(d: pd.Timestamp) -> str | None:
+        def ts_name_at(d: pd.Timestamp, nc=nc) -> str | None:
             rows = nc[nc["start"] <= d]
             return None if rows.empty else str(rows.iloc[-1]["name"])
 
@@ -387,13 +398,38 @@ def check_suspend(pool: TusharePool | None, rep: Report) -> None:
         rep.info("完全一致 ✓")
 
 
-def check_delist(store: Path, rep: Report) -> None:
+def check_delist(
+    store: Path,
+    rep: Report,
+    codes: list[str] | None = None,
+) -> None:
     rep.section("delist 退市清单：本地 tushare stock_basic(D) vs akshare 沪深退市表")
     basic_file = store / "stock_basic_tushare.parquet"
     if not basic_file.exists():
-        rep.info("本地 stock_basic_tushare.parquet 缺失，跳过。")
+        rep.unavailable("本地 stock_basic_tushare.parquet 缺失，无法形成双源判定。")
         return
     sb = pd.read_parquet(basic_file)
+    required = {"list_status", "ts_code"}
+    if not required <= set(sb.columns):
+        rep.unavailable(
+            f"本地 stock_basic_tushare.parquet 缺列 {sorted(required - set(sb.columns))}"
+        )
+        return
+    requested = sorted(set(codes)) if codes is not None else None
+    if requested is not None:
+        unsupported = [
+            code for code in requested if not code.endswith((".SH", ".SZ"))
+        ]
+        for code in unsupported:
+            rep.unavailable(
+                f"DELIST_VERDICT code={code} status=unavailable "
+                "reason=external-source-does-not-cover-exchange"
+            )
+        requested = [
+            code for code in requested if code.endswith((".SH", ".SZ"))
+        ]
+        if not requested:
+            return
     ts_delist = {c for c in sb.loc[sb["list_status"] == "D", "ts_code"]
                  if c.endswith((".SH", ".SZ"))}
     ak_delist: set[str] = set()
@@ -405,12 +441,29 @@ def check_delist(store: Path, rep: Report) -> None:
             if col is None:
                 continue
             for raw in df[col]:
-                try:
+                with contextlib.suppress(Exception):
                     ak_delist.add(format_code(str(raw).strip()))
-                except Exception:
-                    pass
     except Exception as exc:
-        rep.info(f"akshare 退市表拉取失败，跳过: {exc}")
+        rep.unavailable(f"akshare 退市表拉取失败，无法形成双源判定: {exc}")
+        return
+    if not ak_delist:
+        rep.unavailable("akshare 退市表返回空集合，无法形成可信的双源判定")
+        return
+    if requested is not None:
+        for code in requested:
+            local_hit = code in ts_delist
+            external_hit = code in ak_delist
+            if local_hit and external_hit:
+                rep.info(
+                    f"DELIST_VERDICT code={code} status=pass "
+                    "local=tushare-D external=akshare-delist"
+                )
+            else:
+                rep.issue(
+                    f"DELIST_VERDICT code={code} status=fail "
+                    f"local={'tushare-D' if local_hit else 'missing'} "
+                    f"external={'akshare-delist' if external_hit else 'missing'}"
+                )
         return
     only_ts, only_ak = sorted(ts_delist - ak_delist), sorted(ak_delist - ts_delist)
     # B 股（200xxx.SZ / 900xxx.SH）不在 A 股框架范围内，从缺口统计里剔除
@@ -440,11 +493,20 @@ def main() -> int:
     ap.add_argument("--codes", default=None, help="空格/逗号分隔样本代码；缺省用内置样本")
     ap.add_argument("--checks", default=",".join(ALL_CHECKS),
                     help=f"要跑的对比项，逗号分隔（默认全部：{','.join(ALL_CHECKS)}）")
+    ap.add_argument(
+        "--basic-info-store",
+        default=None,
+        help="delist 检查的基础信息根；缺省沿用 config.data.store_path",
+    )
     ap.add_argument("--out", default=None, help="markdown 报告输出路径（默认 reports/ 下按日期）")
     args = ap.parse_args()
 
     cfg = load_config()
     store = Path(cfg.data.store_path)
+    basic_info_store = (
+        Path(args.basic_info_store) if args.basic_info_store else store
+    )
+    explicit_codes = args.codes is not None
     codes = ([format_code(c) for c in args.codes.replace(",", " ").split()]
              if args.codes else list(DEFAULT_CODES))
     checks = {c.strip() for c in args.checks.split(",") if c.strip()}
@@ -462,14 +524,21 @@ def main() -> int:
     profile = ProfileStore(tdx_path=tdx_path, snapshot_path=store / "profile_names.parquet")
 
     rep = Report()
-    rep.info(f"store = {store} | 样本 {len(codes)} 只: {' '.join(codes)}")
+    rep.info(
+        f"store = {store} | basic_info_store = {basic_info_store} | "
+        f"样本 {len(codes)} 只: {' '.join(codes)}"
+    )
     runners = {
         "calendar": lambda: check_calendar(store, pool_or_none, rep),
         "factor": lambda: check_factor(store, pool_or_none, codes, rep),
         "exdiv": lambda: check_exdiv(store, gbbq, pool_or_none, codes, rep),
         "rename": lambda: check_rename(store, profile, pool_or_none, codes, rep),
         "suspend": lambda: check_suspend(pool_or_none, rep),
-        "delist": lambda: check_delist(store, rep),
+        "delist": lambda: check_delist(
+            basic_info_store,
+            rep,
+            codes if explicit_codes else None,
+        ),
     }
     for name in ALL_CHECKS:
         if name not in checks:
@@ -483,6 +552,8 @@ def main() -> int:
         Path(__file__).resolve().parent.parent / "reports"
         / f"cross_validation_{date.today():%Y%m%d}.md")
     rep.save(out)
+    if rep.unavailable_count:
+        return 2
     return 1 if rep.issues else 0
 
 
