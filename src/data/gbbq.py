@@ -315,6 +315,42 @@ class GbbqStore:
             .reset_index(drop=True)
         )
 
+    def nonstandard_event_dates(self, code: str) -> set[pd.Timestamp]:
+        """送转/配股事件中**总股本变化与送配比例不符**的日期（非全体股东同比例的除权）。
+
+        判据：同日 category 5 的总股本 前→后 比值 ≠ ``1 + 送转/10 + 配股/10``（容差 2%）。
+        典型为股改对价（非流通股东向流通股东送股，总股本不变；2005–2008）及重整/定向转增。
+        交易所对这类日子不按标准公式出除权参考价（股改复牌首日还不设涨跌幅限制）；实测
+        对照交易所前收：总股本不变的 855 个复牌日中 812 个未做除权。无同日 category 5
+        记录的事件无法判定，不在结果中。
+        """
+        self._load()
+        std = format_code(code)
+        if self._df is None or self._df.empty or "." not in std:
+            return set()
+        num, suffix = std.split(".")
+        market = _MARKET_BY_SUFFIX.get(suffix)
+        sub = self._df[(self._df["market"] == market) & (self._df["code"] == num)]
+        ev = sub[sub["category"] == GBBQ_CATEGORY_EXDIV]
+        chg = sub[sub["category"] == GBBQ_CATEGORY_SHARECHANGE]
+        if ev.empty or chg.empty:
+            return set()
+        ratio = (
+            1.0 + pd.to_numeric(ev["songgu_qianzongguben"], errors="coerce").fillna(0.0) / 10.0
+            + pd.to_numeric(ev["peigu_houzongguben"], errors="coerce").fillna(0.0) / 10.0
+        )
+        ev = ev.assign(ratio=ratio.to_numpy(), date=pd.to_datetime(ev["date"]).dt.normalize())
+        ev = ev[ev["ratio"] > 1.0]
+        tot_before = pd.to_numeric(chg["peigujia_qianzongguben"], errors="coerce")
+        tot_after = pd.to_numeric(chg["peigu_houzongguben"], errors="coerce")
+        chg = chg.assign(
+            tot_ratio=(tot_after / tot_before.where(tot_before > 0)).to_numpy(),
+            date=pd.to_datetime(chg["date"]).dt.normalize(),
+        ).dropna(subset=["tot_ratio"]).drop_duplicates(subset=["date"], keep="last")
+        m = ev.merge(chg[["date", "tot_ratio"]], on="date")
+        bad = (m["tot_ratio"] / m["ratio"] - 1.0).abs() > 0.02
+        return set(pd.to_datetime(m.loc[bad, "date"]))
+
     def _load_supplement(self) -> pd.DataFrame | None:
         """懒读 tushare 补充事件表（无文件/读失败返回 None，静默兜底为"无补充"）。"""
         if self._supp_loaded:

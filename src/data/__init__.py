@@ -27,12 +27,13 @@ from .fetcher import (
 from .gbbq import GbbqStore
 from .processor import DataProcessor
 from .profile import ProfileStore
-from .storage import DAILY_COLUMNS, FREQ_DIRS, MINUTE_COLUMNS, DataStore
+from .storage import DAILY_COLUMNS, DAILY_META_COLUMNS, FREQ_DIRS, MINUTE_COLUMNS, DataStore
 from .trading_calendar import TradingCalendar
 from .universe import Universe
 
 __all__ = [
     "DAILY_COLUMNS",
+    "DAILY_META_COLUMNS",
     "FREQ_DIRS",
     "MINUTE_COLUMNS",
     "DataFetchError",

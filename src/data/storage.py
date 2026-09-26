@@ -2,11 +2,12 @@
 本地数据仓库（storage）
 =======================
 
-职责：parquet 读写 + 复权缓存。**原始价与因子分离落盘**：
+职责：parquet 读写 + 复权缓存。**原始数据与加工信息分离落盘**：
 
 落盘布局::
 
-    {store}/daily/{code}.parquet          # 不复权日线 OHLCV + 涨跌停/停牌/名称/来源
+    {store}/daily/{code}.parquet          # 原始日线：只存数据源返回的成交行（不复权 OHLCV + 来源）
+    {store}/daily_meta/{code}.parquet     # 日线加工层：交易日时间轴 + 停牌/状态 + 涨跌停价（可重算）
     {store}/min1/{code}.parquet           # 不复权 1 分钟 OHLCV
     {store}/min5/{code}.parquet           # 不复权 5 分钟 OHLCV
     {store}/factors/{code}.parquet        # date → cum_factor（生效因子，覆盖刷新）
@@ -21,8 +22,15 @@
 ------------------------
 - **只缓存 hfq 一份到硬盘**；``qfq`` 由 hfq 除以锚点日累计因子（标量）现场派生，
   ``none`` 直接读原始，二者都不落缓存。
-- **版本戳重算，不按时间删除**：hfq 缓存文件的 mtime ≥ ``原始文件`` 与 ``因子文件``
-  的 mtime 时视为有效；任一源更新（mtime 变新）即重算覆盖。既不浪费也不读脏数据。
+- **版本戳重算，不按时间删除**：hfq 缓存文件的 mtime ≥ ``原始文件`` / ``因子文件`` /
+  （日线）``加工层文件`` 的 mtime 时视为有效；任一源更新（mtime 变新）即重算覆盖。
+
+日线视图（``read_view`` / ``load``）
+------------------------------------
+原始日线不含停牌占位行与任何加工列；读取时按 ``daily_meta`` 的交易日时间轴外连接原始行，
+补回 ``is_suspended`` / ``limit_up`` / ``limit_down`` / ``status``（停牌、缺数据的日子是 OHLCV
+全 NaN 的行，与旧版占位行口径一致）。加工层由 ``DataFetcher`` 在更新时生成，
+``DataFetcher.rebuild_daily_meta`` 可随时按最新规则整体重算，原始文件不动。
 """
 
 from __future__ import annotations
@@ -41,7 +49,7 @@ from .factors import FACTOR_COLUMNS
 # 字段规范（**原始不复权**落盘；复权在 load 时按需合成）
 # ============================================================
 
-#: 日线落盘字段（不复权 OHLCV + 元数据）
+#: 原始日线落盘字段（只存数据源返回的成交行：不复权 OHLCV + 行级来源）
 DAILY_COLUMNS: dict[str, str] = {
     "date": "datetime64[ns]",
     "code": "string",
@@ -51,15 +59,57 @@ DAILY_COLUMNS: dict[str, str] = {
     "close": "float64",
     "volume": "float64",
     "amount": "float64",
-    "is_suspended": "bool",
-    "limit_up": "float64",
-    "limit_down": "float64",
-    # name 为**当前证券简称**（便利元数据，非点位）：整列贴的是落盘时的当前名，**不可**用于
-    # 历史时点 ST 判定。点位曾用名请用 ProfileStore.name_at / Universe.name_at。涨跌停限幅
-    # （limit_up/down）已是点位 ST 口径，不依赖本列。
-    "name": "string",
     "source": "string",  # 行级数据来源，便于溯源/回滚
 }
+
+#: 日线加工层字段（``daily_meta/``；由原始日线 + 交易日历 + 停牌名单 + 权息 + 更名史派生）
+DAILY_META_COLUMNS: dict[str, str] = {
+    "date": "datetime64[ns]",
+    # 当日不可交易：无成交数据（停牌或缺数据），或零成交且停牌名单确认停牌
+    "is_suspended": "bool",
+    "limit_up": "float64",    # 涨停价（不设限 / 无法确定 → NaN）
+    "limit_down": "float64",  # 跌停价
+    "status": "string",       # trade=有成交数据 | suspend=停牌名单确认停牌 | missing=无数据且未确认
+}
+
+#: 日线加工层目录名
+DAILY_META_DIR = "daily_meta"
+
+
+def build_daily_view(
+    raw: pd.DataFrame | None, meta: pd.DataFrame | None, code: str = "",
+) -> pd.DataFrame | None:
+    """原始日线 + 加工层 → 日线视图（交易日时间轴，列 = DAILY_COLUMNS + 加工列）。
+
+    按日期外连接：加工层时间轴上无原始行的日子（停牌/缺数据）补 OHLCV 全 NaN 的行；
+    加工层缺失或滞后（原始行不在时间轴上）时，这些行 ``is_suspended`` 按"有无收盘价"兜底、
+    涨跌停为 NaN。
+    """
+    if raw is None:
+        return None
+    meta_cols = [c for c in DAILY_META_COLUMNS if c != "date"]
+    if meta is None or meta.empty:
+        # 无加工层：兜底（尚未迁移的旧格式仓库原始文件自带这些列，原样沿用）
+        out = raw.copy()
+        if "is_suspended" not in out.columns:
+            out["is_suspended"] = out["close"].isna()
+        for c in ("limit_up", "limit_down"):
+            if c not in out.columns:
+                out[c] = float("nan")
+        if "status" not in out.columns:
+            out["status"] = pd.array([pd.NA] * len(out), dtype="string")
+        return out
+    raw_cols = [c for c in raw.columns if c not in meta_cols]
+    out = meta[["date", *meta_cols]].merge(raw[raw_cols], on="date", how="outer")
+    out = out.sort_values("date").reset_index(drop=True)
+    stale = out["is_suspended"].isna()
+    if stale.any():
+        out.loc[stale, "is_suspended"] = out.loc[stale, "close"].isna()
+    out["is_suspended"] = out["is_suspended"].astype(bool)
+    if "code" in out.columns:
+        out["code"] = out["code"].fillna(code or (raw["code"].iloc[0] if len(raw) else ""))
+    extra = [c for c in out.columns if c not in DAILY_COLUMNS and c not in meta_cols]
+    return out[[*[c for c in DAILY_COLUMNS if c in out.columns], *meta_cols, *extra]]
 
 #: 分钟线落盘字段（不复权 OHLCV；仅 min1 / min5 落盘）
 MINUTE_COLUMNS: dict[str, str] = {
@@ -90,6 +140,7 @@ class DataStore:
         self._dirs = {f: self._store_path / d for f, d in FREQ_DIRS.items()}
         for d in self._dirs.values():
             ensure_dir(d)
+        self._meta_dir = ensure_dir(self._store_path / DAILY_META_DIR)
         self._factor_dir = ensure_dir(self._store_path / "factors")
         # gbbq 自算因子并存目录（与外部源 factors/ 互不覆盖，便于长期交叉对比）
         self._factor_gbbq_dir = ensure_dir(self._store_path / "factors_gbbq")
@@ -103,6 +154,9 @@ class DataStore:
 
     def freq_path(self, code: str, freq: str) -> Path:
         return self._dirs[freq] / f"{code}.parquet"
+
+    def daily_meta_path(self, code: str) -> Path:
+        return self._meta_dir / f"{code}.parquet"
 
     def factor_path(self, code: str, gbbq: bool = False) -> Path:
         base = self._factor_gbbq_dir if gbbq else self._factor_dir
@@ -137,6 +191,7 @@ class DataStore:
     # ------------------------------------------------------------
 
     def read_raw(self, code: str, freq: str) -> pd.DataFrame | None:
+        """原始数据（数据源返回的行，不含停牌占位与加工列）。日线要带停牌/涨跌停请用 ``read_view``。"""
         path = self.freq_path(code, freq)
         if not path.exists():
             return None
@@ -156,6 +211,35 @@ class DataStore:
         path = self.freq_path(code, freq)
         ensure_dir(path.parent)
         df.to_parquet(path, index=False, compression="snappy")
+
+    # ------------------------------------------------------------
+    # 日线加工层读写 + 视图
+    # ------------------------------------------------------------
+
+    def read_daily_meta(self, code: str) -> pd.DataFrame | None:
+        path = self.daily_meta_path(code)
+        if not path.exists():
+            return None
+        try:
+            df = pd.read_parquet(path)
+            df["date"] = pd.to_datetime(df["date"])
+            return df.sort_values("date").reset_index(drop=True)
+        except Exception as exc:
+            logger.warning(f"读取日线加工层 {path} 失败: {exc}（视为缺失）")
+            return None
+
+    def write_daily_meta(self, code: str, df: pd.DataFrame) -> None:
+        path = self.daily_meta_path(code)
+        ensure_dir(path.parent)
+        df[list(DAILY_META_COLUMNS)].to_parquet(path, index=False, compression="snappy")
+
+    def read_view(self, code: str, freq: str) -> pd.DataFrame | None:
+        """不复权视图：日线 = 原始行按加工层时间轴外连接（含停牌行与 is_suspended/涨跌停/status）；
+        分钟 = 原始行。"""
+        raw = self.read_raw(code, freq)
+        if freq != "daily":
+            return raw
+        return build_daily_view(raw, self.read_daily_meta(code), code)
 
     # ------------------------------------------------------------
     # 因子读写
@@ -202,12 +286,16 @@ class DataStore:
         raw = self.freq_path(code, freq)
         if raw.exists() and raw.stat().st_mtime > cache_mt:
             return False
+        if freq == "daily":
+            meta = self.daily_meta_path(code)
+            if meta.exists() and meta.stat().st_mtime > cache_mt:
+                return False
         factor = self._effective_factor_path(code, use_gbbq)
         return not (factor.exists() and factor.stat().st_mtime > cache_mt)
 
     def _build_hfq_cache(self, code: str, freq: str, use_gbbq: bool = False) -> pd.DataFrame | None:
         """重算并落盘 hfq 缓存；原始缺失返回 None。"""
-        raw = self.read_raw(code, freq)
+        raw = self.read_view(code, freq)
         if raw is None or raw.empty:
             return None
         factor = self._effective_factor(code, use_gbbq)
@@ -254,7 +342,7 @@ class DataStore:
         mode = (adjust or "hfq").strip().lower()
         tc = _time_col(freq)
         if mode == "none":
-            raw = self.read_raw(code, freq)
+            raw = self.read_view(code, freq)
             if raw is None:
                 return None
             factor = self._effective_factor(code, use_gbbq)

@@ -8,7 +8,9 @@ A 股行情拉取器（多源容灾 + 多周期 + 增量更新 + 原始/因子�
    外加**刷新复权因子表**。复权本身由 ``src.data.adjust`` 在 load 时按需合成
    （见 ``DataStore.load``），``fetcher`` 不再把复权价烤进文件。
 2. **原始价与因子分离**（核心）：
-   - ``{store}/daily|min5|min1/{code}.parquet`` 存**不复权** OHLCV + 涨跌停/停牌等元数据；
+   - ``{store}/daily|min5|min1/{code}.parquet`` 只存数据源返回的**不复权**成交行（OHLCV + 来源）；
+   - ``{store}/daily_meta/{code}.parquet`` 日线加工层：交易日时间轴 + 停牌/状态 + 涨跌停价
+     （由原始日线、停牌名单、权息、更名史派生，``rebuild_daily_meta`` 可整体重算）；
    - ``{store}/factors/{code}.parquet`` 存 ``date→cum_factor``，每次覆盖刷新；
    - 因此**不再需要因子自愈**：原始价永不被改写，因子表直接刷新即可。
 3. **拉取优先级**：``pytdx``（通达信本地盘）→ ``tushare``（官方，需 token；缺 token
@@ -37,7 +39,7 @@ import random
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -48,6 +50,7 @@ from ..utils.helpers import (
     Timer,
     format_code,
     get_limit_pct,
+    is_limit_5pct_name,
     parse_date,
     retry,
 )
@@ -73,6 +76,7 @@ from .sources import (
 from .sources.tushare_pool import get_tushare_tokens
 from .storage import (  # 重导出，保持向后兼容
     DAILY_COLUMNS,
+    DAILY_META_COLUMNS,
     FREQ_DIRS,
     MINUTE_COLUMNS,
     DataStore,
@@ -118,44 +122,47 @@ __all__ = [
 
 
 # ============================================================
-# 涨跌停回补（纯函数；原始价口径，不涉及复权）
+# 涨跌停价（纯函数；原始价口径，不涉及复权）
 # ============================================================
 
 
-def _backfill_limit_df(
-    df: pd.DataFrame, limit_pct: float | pd.Series,
-) -> pd.DataFrame:
-    """回补 ``limit_up`` / ``limit_down`` 的 NaN（典型为增量批次首行缺前收）。
+def _round_price(x) -> np.ndarray:
+    """价格四舍五入到分（交易所口径；numpy ``round`` 是银行家舍入，x.xx5 会舍错）。"""
+    x = np.asarray(x, dtype="float64")
+    return np.floor(x * 100.0 + 0.5 + 1e-7) / 100.0
 
-    原始价口径：用前一行（不复权）``close`` 作为参考收盘价反推。仅填 NaN 单元，
-    不覆盖已有值；首行无前收则保持 NaN。
 
-    ``limit_pct`` 可为标量，或与 ``df`` **当前索引对齐**的逐行限幅比例 ``Series``
-    （主板历史 ST 时段 ±5% / 非 ST ±10% 的点位口径，见 ``_limit_pct_series``）。
-    传 Series 时按 ``df`` 索引重排，因此调用方无需保证行序与函数内部排序一致。
+def _limit_ref_price(
+    dates: pd.Series, close: pd.Series, events: pd.DataFrame | None = None,
+) -> np.ndarray:
+    """逐行涨跌停**计算基准价**（交易所"前收盘价"口径），与 ``dates`` 同序。
+
+    - 前收 = 本行之前**最近一个有价行**的收盘价（跨过停牌占位行，复牌日不再缺失）；
+    - 前一有价日（不含）到本行（含）之间若有除权除息事件（gbbq ``events``，每 10 股口径），
+      依次换算为除权除息参考价 ``(前收 − 派息 + 配股价 × 配股比例) / (1 + 送转比例 + 配股比例)``；
+    - ``events`` 可带布尔列 ``nonstandard``（见 ``GbbqStore.nonstandard_event_dates``：股改对价/
+      定向转增等，交易所不按标准公式除权且可能不设限）→ 受影响行基准价为 NaN（不臆造）；
+    - 结果按分四舍五入。首个有价行之前无前收 → NaN。
     """
-    if df is None or df.empty:
-        return df
-    if "limit_up" not in df.columns or "limit_down" not in df.columns:
-        return df
-    need = df["limit_up"].isna() | df["limit_down"].isna()
-    if not need.any():
-        return df
-    df = df.sort_values("date")
-    if isinstance(limit_pct, pd.Series):
-        pct = pd.to_numeric(limit_pct.reindex(df.index), errors="coerce").to_numpy()
-    else:
-        pct = np.full(len(df), float(limit_pct))
-    df = df.reset_index(drop=True)
-    ref = pd.to_numeric(df["close"], errors="coerce")
-    prev_ref = ref.shift(1)
-    lu = (prev_ref * (1.0 + pct)).round(2)
-    ld = (prev_ref * (1.0 - pct)).round(2)
-    fill_up = df["limit_up"].isna() & lu.notna()
-    fill_dn = df["limit_down"].isna() & ld.notna()
-    df.loc[fill_up, "limit_up"] = lu[fill_up]
-    df.loc[fill_dn, "limit_down"] = ld[fill_dn]
-    return df
+    d = pd.to_datetime(dates).dt.normalize().to_numpy()
+    c = pd.to_numeric(close, errors="coerce")
+    ref = c.ffill().shift(1).to_numpy(dtype="float64", copy=True)
+    prev_day = pd.Series(d).where(c.notna().to_numpy()).ffill().shift(1).to_numpy()
+    if events is not None and not events.empty:
+        has_prev = ~pd.isna(prev_day)
+        for ev in events.sort_values("date").itertuples(index=False):
+            ev_day = np.datetime64(pd.Timestamp(ev.date).normalize())
+            hit = has_prev & (d >= ev_day)
+            hit[hit] = prev_day[hit] < ev_day
+            if not hit.any():
+                continue
+            if getattr(ev, "nonstandard", False):
+                ref[hit] = np.nan
+                continue
+            div, song, pei = ev.fenhong / 10.0, ev.song / 10.0, ev.pei / 10.0
+            ex = (ref[hit] - div + pei * ev.peijia) / (1.0 + song + pei)
+            ref[hit] = np.where(ex > 0, ex, np.nan)
+    return _round_price(ref)
 
 
 # ============================================================
@@ -254,6 +261,7 @@ class DataFetcher:
         # store 的实例共享会串扰（A 实例读到 B 实例 store 的名称/退市表），故改为实例属性。
         self._stock_name_cache: dict[str, str] = {}
         self._delist_date_cache: dict[str, date] = {}
+        self._list_date_cache: dict[str, pd.Timestamp] | None = None
         # 多线程：保护源懒构建与股票名称表的并发初始化
         self._source_lock = threading.Lock()
         self._name_lock = threading.Lock()
@@ -627,38 +635,45 @@ class DataFetcher:
             codes = [c for c in codes if not c.endswith(".BJ")]
         return sorted(set(codes))
 
-    def recompute_limits(self, codes: Sequence[str] | None = None) -> int:
-        """用逐行点位 ST 重算已落盘日线的 ``limit_up`` / ``limit_down``（历史数据迁移）。
+    def rebuild_daily_meta(
+        self, codes: Sequence[str] | None = None, max_workers: int | None = None,
+    ) -> int:
+        """按最新规则整体重算日线加工层 ``daily_meta/``（原始日线不动）。
 
-        早期落盘的限幅按**当前名**整段近似，主板历史 ST 时段的 ±5% 未还原。本方法对已
-        存日线**逐行按行日期点位 ST** 重算并覆盖写回（原始 OHLCV 等其余字段不变；仅有
-        前收的行才覆盖，每段首行无前收保持原值）。``codes=None`` → 本地全部日线。
-
-        返回重写的股票数。``profile.dat`` 不可用时主板回退当前名近似（结果与旧值一致）。
+        时间轴、停牌状态、涨跌停价的口径见 ``_build_daily_meta``。规则或其输入（权息、
+        更名史、停牌名单、基础信息）变化后运行即可。``codes=None`` → 本地全部日线。
+        返回内容有变化而重写的股票数。
         """
         if codes is None:
             codes = sorted(p.stem for p in self._store._dirs["daily"].glob("*.parquet"))
         codes = [format_code(c) for c in codes]
-        # 解析一次更名快照，供 _limit_pct_series 逐日点位 ST 判定
-        if self._profile.available:
-            try:
-                self._profile.save_snapshot()
-            except Exception as exc:
-                logger.debug(f"profile 更名快照写盘跳过: {exc}")
+        # 解析一次更名/权息快照，供点位 ST 判定与除权参考价
+        for store in (self._profile, self._gbbq):
+            if store.available:
+                try:
+                    store.save_snapshot()
+                except Exception as exc:
+                    logger.debug(f"{type(store).__name__} 快照写盘跳过: {exc}")
+        self._prewarm_suspend_cache()
+
+        def _one(code: str) -> bool:
+            raw = self._store.read_raw(code, "daily")
+            if raw is None or raw.empty:
+                return False
+            return self._refresh_daily_meta(code, raw, since=None)
+
+        workers = max(1, int(max_workers if max_workers is not None else self._max_workers))
         n = 0
-        for code in codes:
-            df = self._store.read_raw(code, "daily")
-            if df is None or df.empty:
-                continue
-            df = df.sort_values("date").reset_index(drop=True)
-            prev_ref = pd.to_numeric(df["close"], errors="coerce").shift(1)
-            pct = self._limit_pct_series(code, df["date"])
-            mask = prev_ref.notna()
-            df.loc[mask, "limit_up"] = (prev_ref * (1.0 + pct)).round(2)[mask]
-            df.loc[mask, "limit_down"] = (prev_ref * (1.0 - pct)).round(2)[mask]
-            self._store.write_raw(code, "daily", self._cast_types(df, DAILY_COLUMNS))
-            n += 1
-        logger.info(f"涨跌停限幅重算完成 | 重写 {n} 只股票日线")
+        with Timer("日线加工层重算"):
+            if workers <= 1:
+                n = sum(_one(c) for c in codes)
+            else:
+                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="meta") as ex:
+                    for done, changed in enumerate(ex.map(_one, codes), start=1):
+                        n += int(changed)
+                        if done % 500 == 0:
+                            logger.info(f"加工层重算进度 {done}/{len(codes)} | 有变化 {n}")
+        logger.info(f"日线加工层重算完成 | {len(codes)} 只，重写 {n} 只")
         return n
 
     # ------------------------------------------------------------
@@ -693,6 +708,7 @@ class DataFetcher:
             local_max = existing[time_col].max()
             local_max_date = local_max.date() if hasattr(local_max, "date") else local_max
             if freq == "daily":
+                # 游标 = 原始日线最后一个成交日（原始层不含停牌占位行；停牌由停牌名单判定，见下）
                 if local_max_date >= last_trading:
                     logger.debug(f"[{code}|{freq}] 已最新（{local_max_date}），跳过")
                     return
@@ -723,12 +739,17 @@ class DataFetcher:
         if start > end:
             return
         local_only = delist_d is not None and freq != "daily"
+        meta_since = pd.Timestamp(start)  # 加工层从原游标之后开始重算
 
-        # 前置短路：增量区间内每个交易日都被权威停牌名单确认停牌 → 当天（整段）停牌，
-        # 直接跳过取数，避免对每个源做无谓的 fallback。不推进游标，复牌后整段一并补拉。
-        if self._range_fully_suspended(code, start, end):
-            logger.debug(f"[{code}|{freq}] 区间 {start}~{end} 整段确认停牌，跳过增量更新")
+        # 前置短路：跳过区间开头被权威停牌名单确认停牌的交易日（停牌期不取数，避免对每个源
+        # 做无谓的 fallback）；整段确认停牌则不取数。日线仍刷新加工层，把确认的停牌日记入时间轴。
+        fetch_start = self._first_unconfirmed_day(code, start, end)
+        if fetch_start is None:
+            logger.debug(f"[{code}|{freq}] 区间 {start}~{end} 整段确认停牌，跳过取数")
+            if freq == "daily" and not first_pull:
+                self._refresh_daily_meta(code, existing, since=meta_since, until=end)
             return
+        start = fetch_start
 
         logger.debug(f"[{code}|{freq}] 拉取 {start}~{end} | {'首拉' if first_pull else '增量'}")
         # 不做复权：原始 OHLCV 直接规整入库（复权在 load 时按需合成）
@@ -736,12 +757,13 @@ class DataFetcher:
             new_df, src = self._fetch_with_fallback(
                 code, start, end, kind="daily", local_only=local_only,
             )
-            # 日线即便区间全空也不立即返回：先按交易日历补全区间，再用权威停牌名单
-            # 判定缺口性质——确认停牌→落停牌占位行；未确认（疑似数据滞后）→裁掉尾部待重拉。
-            new_df = self._post_process_daily(code, new_df, start, end, source=src)
-            new_df = self._trim_unconfirmed_trailing(new_df)
+            # 原始层只落数据源返回的成交行；缺口（停牌/源滞后）不落占位行，由加工层按停牌名单
+            # 标注，未确认的尾部缺口不进时间轴、游标不推进，下次重拉。
+            new_df = self._normalize_daily_raw(code, new_df, source=src)
             if new_df.empty:
-                logger.debug(f"[{code}|{freq}] 区间内无数据且无确认停牌，跳过（不推进游标，下次重拉）")
+                logger.debug(f"[{code}|{freq}] 区间内无成交数据（不推进游标，下次重拉）")
+                if not first_pull:
+                    self._refresh_daily_meta(code, existing, since=meta_since, until=end)
                 return
         else:
             period = "5" if freq == "min5" else "1"
@@ -760,14 +782,12 @@ class DataFetcher:
         else:
             combined = new_df
 
-        # 涨跌停首行回补：增量批次首行因缺前收导致 limit_up/down 为 NaN，
-        # 拼接后用前一行（不复权）收盘价反推补齐。
-        if freq == "daily":
-            combined = _backfill_limit_df(
-                combined, self._limit_pct_series(code, combined["date"]),
-            )
-
         self._store.write_raw(code, freq, combined)
+        # 日线加工层（停牌/涨跌停/时间轴）：按完整历史重算原游标之后的部分，之前的行不动
+        if freq == "daily":
+            self._refresh_daily_meta(
+                code, combined, since=None if first_pull else meta_since, until=end,
+            )
         logger.info(
             f"[{code}|{freq}] 更新成功 | +{len(new_df)} 行 | 末: {combined[time_col].max()}"
         )
@@ -784,43 +804,135 @@ class DataFetcher:
             name = ""
         return get_limit_pct(code, is_st=is_st_name(name))
 
-    def _limit_pct_series(self, code: str, dates: pd.Series) -> pd.Series:
-        """逐行按行日期的点位 ST 计算涨跌停限幅比例（与 ``dates`` 同索引）。
+    def _limit_pct_series(
+        self, code: str, dates: pd.Series, traded: pd.Series | None = None,
+    ) -> pd.Series:
+        """逐行按行日期的涨跌停限幅比例（与 ``dates`` 同索引；不设限为 ``inf``）。
 
-        - 主板（60x/00x）：用 ``ProfileStore.name_at`` 逐日判定点位 ST（曾用名优先、
-          当前名兜底），ST/*ST/退 → ±5%，否则 ±10%。ST 状态随时间变化，故必须逐行算。
-        - 创业板/科创板（±20%）、北交所（±30%）：限幅不受 ST 影响，整列返回板块常量。
+        规则沿革见 ``get_limit_pct``（1996-12-16 前不设限、创业板 2020-08-24 前 ±10%、
+        主板 ST 2026-07-06 起 ±10% 等）。ST 按 ``ProfileStore.name_at`` 逐日点位判定
+        （曾用名优先、当前名兜底），ST 状态随时间变化，故必须逐行算；``profile.dat``
+        不可用时回退到**当前名近似**（与 Universe 口径一致）。
 
-        ``profile.dat`` 不可用时主板回退到**当前名近似**（与 Universe 口径一致）。
+        ``traded``（与 ``dates`` 同索引的"有价行"布尔列，须按日期升序）给出时，再按上市日
+        所处制度套用新股不设限窗口：上市日取本地基础信息 ``list_date``，缺失时取首个有价行。
         """
-        pct_non_st = get_limit_pct(code, is_st=False)
-        pct_st = get_limit_pct(code, is_st=True)
-        # 非主板：ST 不影响限幅，整列常量（同时省去逐日 profile 查询）
-        if pct_non_st == pct_st:
-            return pd.Series(pct_non_st, index=dates.index, dtype="float64")
-        # 主板：逐（唯一）日点位 ST 判定
         try:
             current_name = self._get_stock_name(code)
         except Exception:
             current_name = ""
         use_profile = self._profile is not None and self._profile.available
         norm = pd.to_datetime(dates).dt.normalize()
-        st_cache: dict[pd.Timestamp, bool] = {}
+        pct_cache: dict[pd.Timestamp, float] = {}
 
-        def _is_st_at(ts: pd.Timestamp) -> bool:
-            if pd.isna(ts):  # reindex 出的占位行无日期：当前名兜底
-                return is_st_name(current_name)
-            cached = st_cache.get(ts)
+        def _pct_at(ts: pd.Timestamp) -> float:
+            if pd.isna(ts):  # reindex 出的占位行无日期：当前名、今天的规则兜底
+                return get_limit_pct(code, is_st=is_limit_5pct_name(current_name, date.today()))
+            cached = pct_cache.get(ts)
             if cached is None:
                 former = self._profile.name_at(code, ts) if use_profile else None
-                cached = is_st_name(former if former is not None else current_name)
-                st_cache[ts] = cached
+                is_st = is_limit_5pct_name(former if former is not None else current_name, ts)
+                cached = get_limit_pct(code, is_st=is_st, trade_date=ts)
+                pct_cache[ts] = cached
             return cached
 
-        is_st = norm.map(_is_st_at).to_numpy(dtype=bool)
-        return pd.Series(
-            np.where(is_st, pct_st, pct_non_st), index=dates.index, dtype="float64",
-        )
+        pct = norm.map(_pct_at).astype("float64")
+        if traded is not None:
+            pct = self._apply_ipo_window(code, norm, traded, pct)
+        return pct
+
+    def _apply_ipo_window(
+        self, code: str, dates: pd.Series, traded: pd.Series, pct: pd.Series,
+    ) -> pd.Series:
+        """新股上市后前 N 个有价交易日（按上市日所处制度，见 ``get_limit_pct``）置为不设限。"""
+        tr = traded.to_numpy(dtype=bool)
+        if not tr.any():
+            return pct
+        list_ts = self._list_date(code)
+        first_traded = dates[tr].iloc[0]
+        if list_ts is None:
+            list_ts = first_traded
+        elif first_traded > list_ts + pd.Timedelta(days=14):
+            return pct  # 本地行情不从上市日开始（如迁入/缺早期数据），无法定位新股窗口
+        listed = tr & (dates >= list_ts).to_numpy()
+        ordinal = np.where(listed, np.cumsum(listed), 0)
+        out = pct.copy()
+        for k in range(1, 6):
+            rows = ordinal == k
+            if rows.any() and get_limit_pct(
+                code, trading_days_since_list=k, list_date=list_ts,
+            ) == float("inf"):
+                out[rows] = float("inf")
+        return out
+
+    def _limit_prices(
+        self, code: str, df: pd.DataFrame, rows: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """按完整历史 ``df``（``date``/``close``，停牌行 close 为 NaN）逐行算
+        ``(limit_up, limit_down)``，与 ``df`` 行序一一对应。
+
+        基准价见 ``_limit_ref_price``（跨停牌取前收 + gbbq 除权除息参考价），限幅见
+        ``_limit_pct_series``（规则沿革 + 点位 ST + 新股窗口）；按分四舍五入。
+        不设限或无前收的行为 NaN（下游执行层据此不夹价）。``rows``（与 ``df`` 同序的
+        布尔数组）给出时只算这些行（省去全历史逐日规则判定），其余为 NaN。
+        """
+        order = np.argsort(pd.to_datetime(df["date"]).to_numpy(), kind="stable")
+        s = df.iloc[order].reset_index(drop=True)
+        close = pd.to_numeric(s["close"], errors="coerce")
+        ref = _limit_ref_price(s["date"], close, self._limit_events(code))
+        dates = pd.to_datetime(s["date"]).dt.normalize()
+        if rows is None:
+            pct = self._limit_pct_series(code, dates)
+        else:
+            sel = np.asarray(rows, dtype=bool)[order]
+            pct = self._limit_pct_series(code, dates[sel]).reindex(dates.index)
+        pct = self._apply_ipo_window(code, dates, close.notna(), pct).to_numpy()
+        pct = np.where(np.isfinite(pct), pct, np.nan)
+        up, dn = ref * (1.0 + pct), ref * (1.0 - pct)
+        lu = np.empty(len(s))
+        ld = np.empty(len(s))
+        if format_code(code).endswith(".BJ"):
+            # 北交所：涨停价向下、跌停价向上取至分（限价不超出 ±30%；交易所公布值实测）
+            lu[order] = np.floor(up * 100.0 + 1e-6) / 100.0
+            ld[order] = np.ceil(dn * 100.0 - 1e-6) / 100.0
+        else:
+            lu[order] = _round_price(up)
+            ld[order] = _round_price(dn)
+        return lu, ld
+
+    def _limit_events(self, code: str) -> pd.DataFrame | None:
+        """涨跌停基准价用的除权除息事件（gbbq），带 ``nonstandard`` 标记；不可用返回 None。"""
+        try:
+            if not self._gbbq.available:
+                return None
+            events = self._gbbq.events(code)
+            if events.empty:
+                return events
+            special = self._gbbq.nonstandard_event_dates(code)
+            return events.assign(nonstandard=events["date"].isin(special))
+        except Exception as exc:
+            logger.debug(f"[{code}] gbbq 事件读取失败，涨跌停按未除权前收计算: {exc}")
+            return None
+
+    def _list_date(self, code: str) -> pd.Timestamp | None:
+        """该股票的上市日（本地 tushare 基础信息 ``list_date``；缺失返回 None）。"""
+        if self._list_date_cache is None:
+            with self._delist_lock:
+                if self._list_date_cache is None:
+                    cache: dict[str, pd.Timestamp] = {}
+                    path = self._store_path / STOCK_BASIC_TUSHARE_FILE
+                    try:
+                        df = pd.read_parquet(path, columns=["ts_code", "list_date"])
+                        ld = pd.to_datetime(
+                            df["list_date"].astype("string"), format="%Y%m%d", errors="coerce",
+                        )
+                        for c, d in zip(df["ts_code"].tolist(), ld.tolist(), strict=True):
+                            if pd.notna(d):
+                                cache[format_code(str(c))] = pd.Timestamp(d)
+                    except Exception as exc:
+                        logger.debug(f"读取上市日表失败（新股窗口用首个有价行近似）: {exc}")
+                    self._list_date_cache = cache
+        return self._list_date_cache.get(format_code(code))
 
     # ------------------------------------------------------------
     # 内部：fallback 调度
@@ -899,98 +1011,49 @@ class DataFetcher:
     # 内部：后处理（不复权原始价口径）
     # ------------------------------------------------------------
 
-    def _post_process_daily(
-        self, code: str, df: pd.DataFrame, start: date, end: date, source: str = "",
-    ) -> pd.DataFrame:
-        """日线规整为 DAILY_COLUMNS（不复权）：交易日对齐、停牌补行、涨跌停、名称、来源。
+    def _normalize_daily_raw(self, code: str, df: pd.DataFrame, source: str = "") -> pd.DataFrame:
+        """数据源返回的日线规整为原始层 ``DAILY_COLUMNS``（不复权，只保留成交数据行）。
 
-        缺口行（reindex 出的 NaN 行）按**权威停牌名单**区分来源标签：
-        - 名单确认停牌 → ``{source}:suspend``（真停牌占位行，可推进增量游标）；
-        - 未确认（疑似数据滞后/源未更新）→ ``{source}:gap``（由调用方裁掉尾部待重拉）。
-        区间整段为空时同样按交易日历补全为全 NaN 行后再走上述判定。
+        丢弃无任何价量的空行，以及数据源自带停牌标记（``_suspended``，如 baostock 的
+        tradestatus=0 前收占位行）的行：停牌由加工层按停牌名单标注，不落原始层。
+        零成交但有价的行保留（北交所/低流动性真实交易日，是否停牌交给加工层裁定）。
         """
+        cols = list(DAILY_COLUMNS)
+        if df is None or df.empty or "date" not in df.columns:
+            return self._cast_types(pd.DataFrame(columns=cols), DAILY_COLUMNS)
         df = df.copy()
-        if df.empty or "date" not in df.columns:
-            df = pd.DataFrame(columns=[
-                "date", "open", "high", "low", "close", "volume", "amount", "raw_close",
-            ])
         df["date"] = pd.to_datetime(df["date"]).dt.normalize()
-        df = df.sort_values("date").reset_index(drop=True)
-
-        all_days = self._calendar.get_trading_days(start, end)
-        full_idx = pd.DatetimeIndex(pd.to_datetime(all_days))
-        df = df.set_index("date").reindex(full_idx)
-        df.index.name = "date"
-        df = df.reset_index()
-
-        susp_col = df.pop("_suspended") if "_suspended" in df.columns else None
-
-        # 区分两类"非常规"行：
-        # - no_data：close 为 NaN（reindex 空行 / 源无此日）→ 真缺口，一律视为停牌占位；
-        # - zero_vol_priced：有 close 但零成交 → **歧义**（可能是真停牌的前收占位，也可能是
-        #   北交所/低流动性股的真实零成交交易日）。绝不单凭零成交就判停牌抹价，交由**权威停牌
-        #   名单**裁定：仅名单确认时才算停牌；否则保留为真实（低流动性）交易日，OHLCV 不被抹除。
-        no_data = df["close"].isna()
-        zero_vol_priced = (df["volume"].fillna(0) <= 0) & ~no_data
-        confirmed = self._confirmed_suspended_mask(code, df["date"], no_data | zero_vol_priced)
-
-        is_suspended = no_data.copy()
-        if susp_col is not None:
-            is_suspended = is_suspended | susp_col.fillna(False).astype(bool)
-        is_suspended = is_suspended | (zero_vol_priced & confirmed)
-        df["is_suspended"] = is_suspended.astype(bool)
-
-        # 涨跌停：用不复权前收反推（原始价口径）。限幅按**逐行点位 ST** 判定——
-        # 主板历史 ST 时段 ±5% / 非 ST ±10%（ST 状态随时间变化），创业板/科创板
-        # ±20%、北交所 ±30% 不受 ST 影响（见 _limit_pct_series）。
-        prev_ref = df["close"].shift(1)
-        try:
-            stock_name = self._get_stock_name(code)
-        except Exception:
-            stock_name = ""
-        limit_pct = self._limit_pct_series(code, df["date"])
-        df["limit_up"] = (prev_ref * (1.0 + limit_pct)).round(2)
-        df["limit_down"] = (prev_ref * (1.0 - limit_pct)).round(2)
-
+        if "_suspended" in df.columns:
+            df = df[~df["_suspended"].fillna(False).astype(bool)]
+        price_cols = [c for c in ("open", "high", "low", "close", "volume") if c in df.columns]
+        df = df[df[price_cols].notna().any(axis=1)]
         df["code"] = format_code(code)
-        # name 整列贴**当前名**（便利元数据，非点位）；点位 ST 已落进 limit_up/down，
-        # 历史时点曾用名请用 ProfileStore.name_at（勿用本列做点位 ST 判定）。
-        df["name"] = stock_name
         df["source"] = source or "unknown"
-        base_src = source or "unknown"
-        # 来源标签 / 尾部裁剪只针对**真缺口**（no_data）行：有价零成交是真实数据，
-        # 既不打 :gap（否则会被 _trim_unconfirmed_trailing 误裁）也不打 :suspend。
-        df.loc[no_data & confirmed, "source"] = f"{base_src}:suspend"
-        df.loc[no_data & ~confirmed, "source"] = f"{base_src}:gap"
-
-        for col in DAILY_COLUMNS:
+        for col in cols:
             if col not in df.columns:
                 df[col] = np.nan
-        df = df[list(DAILY_COLUMNS.keys())]
-        return self._cast_types(df, DAILY_COLUMNS)
+        df = df[cols].drop_duplicates(subset=["date"], keep="last")
+        return self._cast_types(df, DAILY_COLUMNS).sort_values("date").reset_index(drop=True)
 
-    def _range_fully_suspended(self, code: str, start: date, end: date) -> bool:
-        """增量区间 ``[start, end]`` 内每个交易日是否都被权威停牌名单确认停牌。
+    def _first_unconfirmed_day(self, code: str, start: date, end: date) -> date | None:
+        """``[start, end]`` 内第一个**未被**权威停牌名单确认停牌的交易日；整段确认停牌返回 None。
 
-        用于取数前置短路：整段都确认停牌则跳过 ``_fetch_with_fallback``，避免无谓的
-        多源 fallback。任一交易日**未被名单确认停牌**（含名单未启用、超出 lookback
-        返回空集、源失败返回空集等情形）即返回 ``False``，回退到正常取数流程，
-        保证不会因名单不可用而漏拉真实数据。
+        增量游标据此跳过停牌期：停牌日不取数（避免对每个源做无谓 fallback）。名单未启用、
+        超出 lookback 且无缓存、源失败等无法确认的日子一律视为"未确认"，照常取数，
+        保证不会因名单不可用而漏拉真实数据。区间内无交易日返回 ``start``（交给取数流程）。
         """
-        if not self._suspend.enabled:
-            return False
         days = self._calendar.get_trading_days(start, end)
-        if not days:
-            return False
+        if not days or not self._suspend.enabled:
+            return start
         std = format_code(code)
         for d in days:
             try:
                 if std not in self._suspend.get_suspended_set(d):
-                    return False
+                    return d
             except Exception as exc:
                 logger.debug(f"[{std}] 停牌名单查询 {d} 失败，按未停牌处理: {exc}")
-                return False
-        return True
+                return d
+        return None
 
     def _confirmed_suspended_mask(
         self, code: str, dates: pd.Series, missing: pd.Series,
@@ -998,7 +1061,7 @@ class DataFetcher:
         """对缺口行用权威停牌名单确认是否为真停牌。
 
         仅对 ``missing`` 为 True 的行查询停牌 provider（provider 内部按交易日整市场
-        缓存，超出 lookback 的久远历史返回空集，不联网）。返回与 ``dates`` 同索引的
+        缓存，超出 lookback 的久远历史只读磁盘缓存、不联网）。返回与 ``dates`` 同索引的
         布尔 Series：True=名单确认停牌。
         """
         confirmed = pd.Series(False, index=dates.index)
@@ -1016,28 +1079,106 @@ class DataFetcher:
                 logger.debug(f"[{std}] 停牌名单查询 {d} 失败: {exc}")
         return confirmed
 
-    @staticmethod
-    def _trim_unconfirmed_trailing(df: pd.DataFrame) -> pd.DataFrame:
-        """裁掉尾部连续的"未确认缺口行"（source 以 ``:gap`` 结尾）。
+    def _build_daily_meta(
+        self,
+        code: str,
+        raw: pd.DataFrame,
+        until: date | None = None,
+        compute_from: pd.Timestamp | None = None,
+    ) -> pd.DataFrame:
+        """由原始日线派生加工层 ``DAILY_META_COLUMNS``（交易日时间轴 + 停牌/状态 + 涨跌停价）。
 
-        这些行可能只是数据源当天尚未更新/源滞后，并非真停牌；裁掉后不写入、不推进
-        增量游标，下次更新会重新拉取。已被权威名单确认的停牌行（``:suspend``）及真实
-        数据行不受影响。中间（被真实数据包夹）的缺口行保留（历史停牌占位）。
+        时间轴：首个原始行 → 最后一个原始行之间的全部交易日，再接上其后**连续被停牌名单
+        确认停牌**的交易日（至 ``until``，默认最近交易日；不越过退市日）。未确认的尾部缺口
+        不进时间轴（可能只是数据源滞后），与增量游标口径一致。
+
+        每行状态：
+        - ``trade``：有收盘价，且非"零成交 + 名单确认停牌"；
+        - ``suspend``：名单确认停牌（无原始行，或零成交行）；
+        - ``missing``：无原始行（或收盘价缺失）且名单未确认。
+        ``is_suspended`` = 非 ``trade``。涨跌停价见 ``_limit_prices``。
+
+        ``compute_from`` 给出时只为该日及之后的行计算涨跌停（其余为 NaN），供增量调用方
+        只替换新行、省去全历史的逐日规则判定。
         """
-        if df is None or df.empty or "source" not in df.columns:
-            return df
-        df = df.sort_values("date").reset_index(drop=True)
-        src = df["source"].astype("string").fillna("")
-        is_gap = src.str.endswith(":gap").to_numpy()
-        keep_n = len(df)
-        for flag in is_gap[::-1]:
-            if flag:
-                keep_n -= 1
-            else:
-                break
-        if keep_n == len(df):
-            return df
-        return df.iloc[:keep_n].reset_index(drop=True)
+        cols = list(DAILY_META_COLUMNS)
+        if raw is None or raw.empty:
+            return self._cast_types(pd.DataFrame(columns=cols), DAILY_META_COLUMNS)
+        r = raw.copy()
+        r["date"] = pd.to_datetime(r["date"]).dt.normalize()
+        r = r.drop_duplicates(subset=["date"], keep="last").set_index("date").sort_index()
+        first, last_raw = r.index.min(), r.index.max()
+
+        days = pd.DatetimeIndex(pd.to_datetime(self._calendar.get_trading_days(first.date(), last_raw.date())))
+        timeline = days.union(r.index)
+
+        # 尾部：原始行之后连续被名单确认停牌的交易日
+        if until is None:
+            today = date.today()
+            until = today if self._calendar.is_trading_day(today) else self._calendar.previous_trading_day(today, n=1)
+        delist = self._delist_date(code)
+        tail_end = min(until, delist - timedelta(days=1)) if delist else until
+        tail_days = []
+        if tail_end > last_raw.date() and self._suspend.enabled:
+            tail_start = self._calendar.next_trading_day(last_raw.date(), n=1)
+            if tail_start <= tail_end:
+                tail_days = self._calendar.get_trading_days(tail_start, tail_end)
+        if tail_days:
+            std = format_code(code)
+            tail = []
+            for d in tail_days:
+                try:
+                    if std not in self._suspend.get_suspended_set(d):
+                        break
+                except Exception:
+                    break
+                tail.append(pd.Timestamp(d))
+            if tail:
+                timeline = timeline.union(pd.DatetimeIndex(tail))
+
+        m = pd.DataFrame({"date": timeline})
+        close = pd.to_numeric(r["close"], errors="coerce").reindex(timeline)
+        volume = pd.to_numeric(r["volume"], errors="coerce").reindex(timeline)
+        priced = close.notna().to_numpy()
+        zero_vol = priced & (volume.fillna(0).to_numpy() <= 0)
+        confirmed = self._confirmed_suspended_mask(
+            code, m["date"], pd.Series(~priced | zero_vol, index=m.index),
+        ).to_numpy()
+        trade = priced & ~(zero_vol & confirmed)
+        m["status"] = np.where(trade, "trade", np.where(confirmed, "suspend", "missing"))
+        m["is_suspended"] = ~trade
+        rows = None if compute_from is None else (m["date"] >= compute_from).to_numpy()
+        m["limit_up"], m["limit_down"] = self._limit_prices(
+            code, pd.DataFrame({"date": m["date"], "close": close.to_numpy()}), rows=rows,
+        )
+        return self._cast_types(m[cols], DAILY_META_COLUMNS)
+
+    def _refresh_daily_meta(
+        self,
+        code: str,
+        raw: pd.DataFrame,
+        since: pd.Timestamp | None = None,
+        until: date | None = None,
+    ) -> bool:
+        """重算并落盘该股日线加工层；返回是否有变化（无变化不写盘，保留 mtime）。
+
+        ``since`` 给出且已有加工层时：``since`` 之前的旧行原样保留，之后的行按完整历史重算
+        （增量更新用）；否则整体重算（``rebuild_daily_meta`` / 首拉）。
+        """
+        old = self._store.read_daily_meta(code)
+        incremental = since is not None and old is not None and not old.empty
+        new = self._build_daily_meta(code, raw, until=until, compute_from=since if incremental else None)
+        if incremental:
+            new = pd.concat(
+                [old[old["date"] < since], new[new["date"] >= since]], ignore_index=True,
+            )
+            new = self._cast_types(new[list(DAILY_META_COLUMNS)], DAILY_META_COLUMNS)
+        if old is not None and len(old) == len(new):
+            o = self._cast_types(old[list(DAILY_META_COLUMNS)].copy(), DAILY_META_COLUMNS)
+            if o.reset_index(drop=True).equals(new.reset_index(drop=True)):
+                return False
+        self._store.write_daily_meta(code, new)
+        return True
 
     def _post_process_minute(self, code: str, df: pd.DataFrame, source: str = "") -> pd.DataFrame:
         """分钟线规整为 MINUTE_COLUMNS（不复权）。"""
@@ -1055,7 +1196,8 @@ class DataFetcher:
     def _cast_types(df: pd.DataFrame, schema: dict[str, str]) -> pd.DataFrame:
         for col, dtype in schema.items():
             if dtype.startswith("datetime"):
-                df[col] = pd.to_datetime(df[col])
+                # 统一到 ns 精度（parquet 往返可能是 us），否则新旧帧比较会因精度不同误判有变化
+                df[col] = pd.to_datetime(df[col]).astype("datetime64[ns]")
             elif dtype == "string":
                 df[col] = df[col].fillna("").astype("string")
             elif dtype == "bool":
@@ -1344,8 +1486,8 @@ def _main() -> int:
         help="关闭 gbbq 增量触发器（强制每次刷新因子，即使无新权息事件）",
     )
     parser.add_argument(
-        "--recompute-limits", action="store_true",
-        help="用逐行点位 ST 重算已落盘日线的涨跌停限幅后退出（历史数据迁移，不拉新数据）",
+        "--rebuild-meta", "--recompute-limits", dest="rebuild_meta", action="store_true",
+        help="按最新规则重算日线加工层 daily_meta（时间轴/停牌/涨跌停）后退出；原始日线不动、不拉新数据",
     )
     parser.add_argument(
         "--log-level", default="INFO",
@@ -1374,10 +1516,10 @@ def _main() -> int:
     )
     logger.info(f"实例化: {fetcher}")
 
-    if args.recompute_limits:
+    if args.rebuild_meta:
         codes = [format_code(c) for c in args.codes] if args.codes else None
-        n = fetcher.recompute_limits(codes)
-        logger.success(f"涨跌停限幅重算完成（重写 {n} 只股票日线）")
+        n = fetcher.rebuild_daily_meta(codes)
+        logger.success(f"日线加工层重算完成（重写 {n} 只）")
         return 0
 
     if args.codes:

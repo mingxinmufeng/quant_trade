@@ -2,7 +2,7 @@
 数据层（存储 / 复权 / 重采样 / 涨跌停回补）单元测试 —— 零网络。
 
 聚焦 ``src.data`` 中可离线验证的纯逻辑：``DataStore`` 读写 + 按需复权、``resample_*``、
-``apply_adjust``、``fetcher._backfill_limit_df``。网络拉取路径不在本测试范围。
+``apply_adjust``、``fetcher`` 涨跌停价（``_limit_ref_price`` / ``_limit_prices``）。网络拉取路径不在本测试范围。
 """
 
 from __future__ import annotations
@@ -137,18 +137,68 @@ def test_resample_weekly_bar_date_is_real_trading_day():
     assert wk["close"].iloc[0] == 4.0                          # 周内最后收盘
 
 
-def test_backfill_limit_df():
-    from src.data.fetcher import _backfill_limit_df
+def test_limit_ref_price_skips_suspension_and_applies_exdiv():
+    """基准价：复牌日取停牌前最后收盘；除权除息日（含停牌期间除权）用参考价。"""
+    from src.data.fetcher import _limit_ref_price
 
-    df = _raw_daily(n=4)
-    df.loc[0, "limit_up"] = np.nan
-    df.loc[0, "limit_down"] = np.nan
-    df.loc[2, "limit_up"] = np.nan
-    out = _backfill_limit_df(df.copy(), limit_pct=0.10)
-    # 首行无前收 → 仍 NaN；第 3 行用前一行 close 反推
-    assert pd.isna(out.loc[0, "limit_up"])
-    assert not pd.isna(out.loc[2, "limit_up"])
-    assert np.isclose(out.loc[2, "limit_up"], round(df.loc[1, "close"] * 1.1, 2))
+    dates = pd.Series(pd.to_datetime([
+        "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-08", "2024-01-09",
+    ]))
+    close = pd.Series([10.0, np.nan, np.nan, 12.0, 13.0, 6.0])   # 01-03/04 停牌占位
+    events = pd.DataFrame({
+        "date": pd.to_datetime(["2024-01-04", "2024-01-09"]),
+        "fenhong": [5.0, 0.0],   # 每 10 股派 5 元（停牌期间除息）
+        "peijia": [0.0, 0.0],
+        "song": [0.0, 10.0],     # 每 10 股送转 10 股
+        "pei": [0.0, 0.0],
+    })
+    ref = _limit_ref_price(dates, close, events)
+    assert np.isnan(ref[0])
+    assert list(ref[1:3]) == [10.0, 9.5]        # 停牌占位行：前收 10；01-04 起除息
+    assert ref[3] == 9.5                        # 复牌日：(10 − 0.5) / 1
+    assert ref[4] == 12.0
+    assert ref[5] == 6.5                        # 13 / (1 + 1)
+
+
+def test_limit_ref_price_nonstandard_event_is_nan():
+    """股改对价等非标准送转事件：交易所不按公式除权（且可能不设限）→ 基准价 NaN，不臆造。"""
+    from src.data.fetcher import _limit_ref_price
+
+    dates = pd.Series(pd.to_datetime(["2006-06-09", "2006-06-12", "2006-06-13"]))
+    events = pd.DataFrame({
+        "date": pd.to_datetime(["2006-06-12"]), "fenhong": [0.0], "peijia": [0.0],
+        "song": [0.7], "pei": [0.0], "nonstandard": [True],
+    })
+    ref = _limit_ref_price(dates, pd.Series([6.92, 6.71, 6.80]), events)
+    assert np.isnan(ref[1]) and ref[2] == 6.71
+
+
+def test_gbbq_nonstandard_event_dates():
+    """送转比例与同日总股本变化不符（股改：总股本不变）才算非标准；正常 10 送 10 不算。"""
+    from src.data.gbbq import GbbqStore
+
+    rows = [  # market, code, date, category, f1, f2, f3, f4
+        (0, "000726", "2006-06-12", 1, 0.0, 0.0, 0.7, 0.0),
+        (0, "000726", "2006-06-12", 5, 14196.0, 42243.2, 15130.9, 42243.2),
+        (0, "000726", "2007-06-19", 1, 3.718, 0.0, 10.0, 0.0),
+        (0, "000726", "2007-06-19", 5, 15130.9, 42243.2, 30279.1, 84486.5),
+    ]
+    df = pd.DataFrame(rows, columns=[
+        "market", "code", "date", "category", "hongli_panqianliutong",
+        "peigujia_qianzongguben", "songgu_qianzongguben", "peigu_houzongguben",
+    ])
+    df["date"] = pd.to_datetime(df["date"])
+    g = GbbqStore(tdx_path="__nonexistent__")
+    g._loaded = True
+    g._df = df
+    assert g.nonstandard_event_dates("000726.SZ") == {pd.Timestamp("2006-06-12")}
+
+
+def test_round_price_half_up():
+    """交易所四舍五入到分（numpy round 对 x.xx5 是银行家舍入）。"""
+    from src.data.fetcher import _round_price
+
+    assert list(_round_price([10.005, 10.015, 2.345, np.nan])[:3]) == [10.01, 10.02, 2.35]
 
 
 # ============================================================
@@ -160,9 +210,12 @@ def _offline_fetcher(tmp_path, code, current_name, profile_rows=None):
     """构造离线 DataFetcher：禁停牌、注入合成 profile 更名表与当前名缓存（零网络）。"""
     from src.data.fetcher import DataFetcher
     from src.data.profile import ProfileStore
+    from src.data.trading_calendar import TradingCalendar
 
+    cal = TradingCalendar(store_path=tmp_path, auto_load=False)  # 离线日历：工作日近似交易日
+    cal._trading_days = pd.bdate_range("1990-12-19", "2027-12-31")
     f = DataFetcher(
-        store_path=tmp_path, tdx_path="__nonexistent__", suspend_enabled=False,
+        store_path=tmp_path, tdx_path="__nonexistent__", suspend_enabled=False, calendar=cal,
     )
     f._stock_name_cache[code] = current_name  # 预置避免触发网络名称表
     if profile_rows is not None:
@@ -187,7 +240,7 @@ def test_limit_pct_series_main_board_pointwise_st(tmp_path):
 
 
 def test_limit_pct_series_non_main_board_ignores_st(tmp_path):
-    """创业板/科创板 ±20%、北交所 ±30%：即便点位名带 ST 也不受影响。"""
+    """创业板（改革后）/科创板 ±20%、北交所 ±30%：即便点位名带 ST 也不受影响。"""
     for code, current, expect in [
         ("300001.SZ", "ST特锐", 0.20),
         ("688001.SH", "ST华兴", 0.20),
@@ -195,11 +248,33 @@ def test_limit_pct_series_non_main_board_ignores_st(tmp_path):
     ]:
         f = _offline_fetcher(
             tmp_path, code, current,
-            profile_rows=[(code, "ST曾用", "2010-01-01")],
+            profile_rows=[(code, "ST曾用", "2022-01-01")],
         )
-        dates = pd.Series(pd.to_datetime(["2009-06-01", "2025-01-01"]))
+        dates = pd.Series(pd.to_datetime(["2021-06-01", "2025-01-01"]))
         pct = f._limit_pct_series(code, dates)
         assert list(pct) == [expect, expect], code
+
+
+def test_limit_pct_series_rule_history(tmp_path):
+    """规则沿革：创业板改革前 ±10%（ST ±5%）；主板 ST 2026-07-06 起 ±10%；1996-12-16 前不设限。"""
+    f = _offline_fetcher(
+        tmp_path, "300001.SZ", "特锐德",
+        profile_rows=[("300001.SZ", "*ST特锐", "2019-01-01")],
+    )
+    dates = pd.Series(pd.to_datetime(["2018-06-01", "2020-08-21", "2020-08-24"]))
+    assert list(f._limit_pct_series("300001.SZ", dates)) == [0.05, 0.10, 0.20]
+
+    f = _offline_fetcher(tmp_path, "600000.SH", "*ST浦发", profile_rows=None)
+    dates = pd.Series(pd.to_datetime(["1996-12-13", "1996-12-16", "2026-07-03", "2026-07-06"]))
+    assert list(f._limit_pct_series("600000.SH", dates)) == [np.inf, 0.10, 0.05, 0.10]
+
+    # 未完成股改（S 前缀）2006-10-09 起 ±5%；退市整理期（含"退"）不按 ST 档
+    f = _offline_fetcher(
+        tmp_path, "600733.SH", "北汽蓝谷",
+        profile_rows=[("600733.SH", "S前锋", "2012-03-16"), ("600733.SH", "前锋退", "2012-04-01")],
+    )
+    dates = pd.Series(pd.to_datetime(["2006-09-29", "2006-10-09", "2012-03-20"]))
+    assert list(f._limit_pct_series("600733.SH", dates)) == [0.10, 0.05, 0.10]
 
 
 def test_limit_pct_series_fallback_current_name(tmp_path):
@@ -211,30 +286,46 @@ def test_limit_pct_series_fallback_current_name(tmp_path):
     assert list(pct) == [0.05, 0.05]
 
 
-def test_backfill_limit_df_with_pct_series(tmp_path):
-    """_backfill_limit_df 接受逐行 pct Series：仅回补 NaN，按行日期取对应限幅。"""
-    from src.data.fetcher import _backfill_limit_df
-
+def test_limit_prices_pointwise_st(tmp_path):
+    """_limit_prices：按行日期取对应限幅；乱序输入按原行序返回。"""
     f = _offline_fetcher(
         tmp_path, "600000.SH", "浦发银行",
         profile_rows=[("600000.SH", "ST浦发", "2010-01-01")],
     )
     df = pd.DataFrame({
-        "date": pd.to_datetime(["2009-12-30", "2009-12-31", "2010-01-04"]),
-        "close": [10.0, 11.0, 12.0],
-        "limit_up": [np.nan, np.nan, np.nan],
-        "limit_down": [np.nan, np.nan, np.nan],
+        "date": pd.to_datetime(["2010-01-04", "2009-12-30", "2009-12-31"]),
+        "close": [12.0, 10.0, 11.0],
     })
-    pct = f._limit_pct_series("600000.SH", df["date"])
-    out = _backfill_limit_df(df.copy(), pct)
-    assert pd.isna(out.loc[0, "limit_up"])              # 首行无前收
-    assert np.isclose(out.loc[1, "limit_up"], 10.5)     # ST 段 ±5%，前收 10
-    assert np.isclose(out.loc[2, "limit_up"], 12.1)     # 常规 ±10%，前收 11
-    assert np.isclose(out.loc[2, "limit_down"], 9.9)
+    lu, ld = f._limit_prices("600000.SH", df)
+    assert np.isnan(lu[1])                  # 首日无前收
+    assert np.isclose(lu[2], 10.5)          # ST 段 ±5%，前收 10
+    assert np.isclose(lu[0], 12.1)          # 常规 ±10%，前收 11
+    assert np.isclose(ld[0], 9.9)
 
 
-def test_recompute_limits_migrates_historical_st(tmp_path):
-    """recompute_limits 用逐行点位 ST 重算已落盘日线限幅，覆盖旧的当前名近似值。"""
+def test_limit_prices_bse_rounds_toward_ref(tmp_path):
+    """北交所：涨停价向下、跌停价向上取整到分（9.95×1.3=12.935→12.93，9.95×0.7=6.965→6.97）。"""
+    f = _offline_fetcher(tmp_path, "920273.BJ", "某北交所股", profile_rows=None)
+    df = pd.DataFrame({"date": pd.bdate_range("2023-08-01", periods=8), "close": np.full(8, 9.95)})
+    lu, ld = f._limit_prices("920273.BJ", df)
+    assert lu[-1] == 12.93 and ld[-1] == 6.97
+
+
+def test_limit_prices_ipo_window(tmp_path):
+    """新股不设限窗口按上市日制度：注册制主板前 5 日 NaN，核准制主板次日即 ±10%。"""
+    for list_day, expect_day2 in [("2023-04-10", np.nan), ("2023-04-06", 11.0)]:
+        f = _offline_fetcher(tmp_path, "600001.SH", "新股", profile_rows=None)
+        dates = pd.bdate_range(list_day, periods=7)
+        df = pd.DataFrame({"date": dates, "close": np.full(7, 10.0)})
+        lu, _ = f._limit_prices("600001.SH", df)
+        if np.isnan(expect_day2):
+            assert np.isnan(lu[:5]).all() and lu[5] == 11.0, list_day
+        else:
+            assert np.isnan(lu[0]) and (lu[1:] == 11.0).all(), list_day
+
+
+def test_rebuild_daily_meta_writes_meta_only(tmp_path):
+    """rebuild_daily_meta 只写加工层（点位 ST 涨跌停），原始日线文件不动；无变化不重写。"""
     f = _offline_fetcher(
         tmp_path, "600000.SH", "浦发银行",
         profile_rows=[("600000.SH", "ST浦发", "2010-01-01")],
@@ -244,22 +335,48 @@ def test_recompute_limits_migrates_historical_st(tmp_path):
     raw = pd.DataFrame({
         "date": dates, "code": "600000.SH",
         "open": close, "high": close, "low": close, "close": close,
-        "volume": 1e5, "amount": 1e6, "is_suspended": False,
-        # 旧值：整段按当前名（非 ST）±10% 近似
-        "limit_up": (close.shift(1) * 1.1).round(2),
-        "limit_down": (close.shift(1) * 0.9).round(2),
-        "name": "浦发银行", "source": "test",
+        "volume": 1e5, "amount": 1e6, "source": "test",
     })
     f._store.write_raw("600000.SH", "daily", raw)
+    raw_mtime = f._store.freq_path("600000.SH", "daily").stat().st_mtime_ns
 
-    n = f.recompute_limits(["600000.SH"])
-    assert n == 1
-    got = f._store.read_raw("600000.SH", "daily").sort_values("date").reset_index(drop=True)
-    assert pd.isna(got.loc[0, "limit_up"])              # 首行无前收，保持原值（NaN）
-    assert np.isclose(got.loc[1, "limit_up"], 10.5)     # 2009-12-31 ST → ±5%，前收 10
-    assert np.isclose(got.loc[1, "limit_down"], 9.5)
-    assert np.isclose(got.loc[2, "limit_up"], 12.1)     # 2010-01-04 常规 → ±10%，前收 11
-    assert np.isclose(got.loc[3, "limit_up"], 13.2)     # 前收 12
+    assert f.rebuild_daily_meta(["600000.SH"], max_workers=1) == 1
+    assert f._store.freq_path("600000.SH", "daily").stat().st_mtime_ns == raw_mtime
+    got = f._store.read_view("600000.SH", "daily")
+    got = got[got["status"] == "trade"]
+    got = got.set_index(got["date"].dt.strftime("%Y-%m-%d"))
+    assert list(got.index) == ["2009-12-30", "2009-12-31", "2010-01-04", "2010-01-05"]
+    assert pd.isna(got.loc["2009-12-30", "limit_up"])              # 首行无前收
+    assert np.isclose(got.loc["2009-12-31", "limit_up"], 10.5)     # ST → ±5%，前收 10
+    assert np.isclose(got.loc["2009-12-31", "limit_down"], 9.5)
+    assert np.isclose(got.loc["2010-01-04", "limit_up"], 12.1)     # 常规 → ±10%，前收 11
+    assert np.isclose(got.loc["2010-01-05", "limit_up"], 13.2)     # 前收 12
+    assert f.rebuild_daily_meta(["600000.SH"], max_workers=1) == 0   # 再跑无变化
+
+
+def test_daily_view_joins_meta_timeline(tmp_path):
+    """视图：加工层时间轴上无原始行的日子补 OHLCV 全 NaN 行；无加工层时兜底不报错。"""
+    from src.data import DataStore
+
+    store = DataStore(tmp_path)
+    raw = _raw_daily(n=3)[["date", "code", "open", "high", "low", "close", "volume", "amount", "source"]]
+    raw = raw.drop(index=1).reset_index(drop=True)              # 第 2 天无原始行（停牌）
+    store.write_raw("000001.SZ", "daily", raw)
+    no_meta = store.read_view("000001.SZ", "daily")
+    assert len(no_meta) == 2 and not no_meta["is_suspended"].any()
+
+    meta = pd.DataFrame({
+        "date": _raw_daily(n=3)["date"], "is_suspended": [False, True, False],
+        "limit_up": [np.nan, 11.0, 11.0], "limit_down": [np.nan, 9.0, 9.0],
+        "status": ["trade", "suspend", "trade"],
+    })
+    store.write_daily_meta("000001.SZ", meta)
+    view = store.read_view("000001.SZ", "daily")
+    assert len(view) == 3
+    assert pd.isna(view.loc[1, "close"]) and bool(view.loc[1, "is_suspended"])
+    assert view.loc[1, "code"] == "000001.SZ"
+    assert list(view.columns[:9]) == ["date", "code", "open", "high", "low", "close", "volume", "amount", "source"]
+    assert np.isclose(store.load("000001.SZ", "daily", adjust="none").loc[2, "limit_up"], 11.0)
 
 
 def test_name_table_prefers_local_tushare(tmp_path):
@@ -379,15 +496,15 @@ def test_datastore_qfq_default_anchor_ignores_future_factor(tmp_path):
 
 
 # ============================================================
-# _post_process_daily：零成交但有价 ≠ 停牌（P0-4）
+# 零成交但有价 ≠ 停牌（P0-4）
 # ============================================================
 
 
-def test_post_process_zero_volume_priced_not_suspended(tmp_path):
+def test_zero_volume_priced_not_suspended(tmp_path):
     """P0-4：有 close 但零成交（北交所/低流动性真实交易日）不应被判停牌、价不被抹。
 
-    停牌名单关闭时，零成交但有价的行交由名单裁定 → 未确认 → is_suspended=False、
-    close 保留、来源不打 :gap（旧逻辑会因 volume<=0 直接判停牌并标 :gap）。
+    停牌名单关闭时，零成交但有价的行交由名单裁定 → 未确认 → 原始层保留该行、
+    加工层 status=trade、is_suspended=False。
     """
     from src.data.fetcher import DataFetcher
     from src.data.trading_calendar import TradingCalendar
@@ -400,19 +517,18 @@ def test_post_process_zero_volume_priced_not_suspended(tmp_path):
                     suspend_enabled=False, calendar=cal)
     f._stock_name_cache["830799.BJ"] = "艾融软件"  # 避免触发网络名称表
 
-    raw = pd.DataFrame({
+    src = pd.DataFrame({
         "date": days,
         "open": [10.0, 10.1, 10.2], "high": [10.0, 10.1, 10.2],
         "low": [10.0, 10.1, 10.2], "close": [10.0, 10.1, 10.2],
         "volume": [1e5, 0.0, 1e5],          # 第 2 日零成交但有价
         "amount": [1e6, 0.0, 1e6], "raw_close": [10.0, 10.1, 10.2],
     })
-    out = f._post_process_daily("830799.BJ", raw, days[0].date(), days[-1].date(), source="test")
-    out = out.sort_values("date").reset_index(drop=True)
-
-    assert bool(out.loc[1, "is_suspended"]) is False, "零成交但有价不应被判停牌"
-    assert np.isclose(out.loc[1, "close"], 10.1), "零成交真实交易日的价格不应被抹"
-    assert not str(out.loc[1, "source"]).endswith(":gap"), "真实数据行不应被标 :gap（否则会被尾部裁剪）"
+    raw = f._normalize_daily_raw("830799.BJ", src, source="test")
+    assert len(raw) == 3, "零成交真实交易日的行不应被丢"
+    meta = f._build_daily_meta("830799.BJ", raw, until=days[-1].date())
+    assert list(meta["status"]) == ["trade", "trade", "trade"], "零成交但有价不应被判停牌"
+    assert not meta["is_suspended"].any()
 
 
 def test_should_skip_factor_external_uses_raw_advance(tmp_path):

@@ -2,7 +2,7 @@
 本地数据完整性检查
 ==================
 扫描 data_store/{daily,min5,min1,factors} 中的 parquet 文件，
-逐文件检查字段、类型、空值、价格逻辑、日期连续性等。
+逐文件检查字段、类型、空值、价格逻辑、日期连续性等；日线另查加工层 daily_meta 是否覆盖原始行。
 
 运行：
     python tests/test_data_integrity.py
@@ -30,6 +30,7 @@ from src.data.fetcher import (  # noqa: E402
     FREQ_DIRS,
     MINUTE_COLUMNS,
 )
+from src.data.storage import DAILY_META_DIR  # noqa: E402
 from src.data.trading_calendar import TradingCalendar  # noqa: E402
 
 # ============================================================
@@ -134,12 +135,25 @@ def _get_trading_days_cached(calendar: TradingCalendar, start: date, end: date) 
     return _tdays_cache[key]
 
 
+def _check_daily_meta(df: pd.DataFrame, meta_path: Path, label: str) -> list[str]:
+    """日线加工层：存在、覆盖全部原始行（否则说明加工层滞后，需 rebuild_daily_meta）。"""
+    if not meta_path.exists():
+        return [f"[{label}] 缺少日线加工层 {meta_path.parent.name}/{meta_path.name}"]
+    meta = pd.read_parquet(meta_path, columns=["date", "status"])
+    missing = set(pd.to_datetime(df["date"])) - set(pd.to_datetime(meta["date"]))
+    if missing:
+        return [f"[{label}] 加工层未覆盖 {len(missing)} 个原始日（最早 {min(missing).date()}），需重算"]
+    df.attrs["suspend_days"] = set(pd.to_datetime(meta.loc[meta["status"] == "suspend", "date"]).dt.date)
+    return []
+
+
 def _check_daily_continuity(df: pd.DataFrame, code: str, calendar: TradingCalendar, label: str) -> list[str]:
-    """日线：检查日期是否为交易日，且是否连续（允许停牌导致的缺失）。"""
+    """日线：检查日期是否为交易日，且是否连续（停牌名单确认的停牌日不算缺失）。"""
     errs = []
     if df.empty:
         return errs
     dates = pd.to_datetime(df["date"]).dt.date.tolist()
+    suspend_days = df.attrs.get("suspend_days", set())
     # 所有日期必须是交易日
     bad_days = [d for d in dates if not calendar.is_trading_day(d)]
     if bad_days:
@@ -148,7 +162,7 @@ def _check_daily_continuity(df: pd.DataFrame, code: str, calendar: TradingCalend
     # 检查相邻交易日是否跨度太大（>20 个交易日无数据则报警，提示可能缺数据）
     trading_days = _get_trading_days_cached(calendar, min(dates), max(dates))
     # 把已有日期转 set，看最长连续缺失
-    has_set = set(dates)
+    has_set = set(dates) | suspend_days
     max_gap = 0
     gap_start = None
     cur_gap = 0
@@ -346,6 +360,7 @@ def _check_one_file(
     errs += _check_price_logic(df, freq, label)
     errs += _check_code_consistency(df, code, label)
     if freq == "daily":
+        errs += _check_daily_meta(df, path.parent.parent / DAILY_META_DIR / path.name, label)
         errs += _check_daily_continuity(df, code, calendar, label)
     else:
         errs += _check_minute_time(df, freq, label)

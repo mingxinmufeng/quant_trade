@@ -6,7 +6,7 @@
   - ``align_cum_factor``   因子 backward 对齐 + 早期段 bfill
   - ``cum_factor_at``      锚点日累计因子
   - ``apply_adjust``       none / hfq / qfq 三模式 + 涨跌停同步缩放
-以及 ``src.data.fetcher._backfill_limit_df`` 涨跌停首行回补。
+以及 ``src.data.fetcher._limit_ref_price`` 涨跌停基准价（首行无前收）。
 
 运行：
     python -m pytest tests/test_adjust.py -q
@@ -31,7 +31,7 @@ from src.data.adjust import (  # noqa: E402
     apply_adjust,
     cum_factor_at,
 )
-from src.data.fetcher import _backfill_limit_df  # noqa: E402
+from src.data.fetcher import _limit_ref_price  # noqa: E402
 
 
 def _daily(dates, closes, factor_cols=None):
@@ -149,20 +149,17 @@ def test_apply_minute_time_col_autodetect():
 
 
 # ------------------------------------------------------------
-# _backfill_limit_df
+# _limit_ref_price
 # ------------------------------------------------------------
 
-def test_backfill_limit_first_row():
-    df = pd.DataFrame({
-        "date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
-        "close": [10.0, 11.0, 12.0],
-        "limit_up": [np.nan, 12.1, 13.2],
-        "limit_down": [np.nan, 9.9, 10.8],
-    })
-    out = _backfill_limit_df(df, 0.10)
-    # 首行无前收 → 保持 NaN；第 2 行用第 1 行 close=10 反推
-    assert pd.isna(out["limit_up"].iloc[0])
-    assert abs(out["limit_up"].iloc[1] - 12.1) < 1e-9
+def test_limit_ref_price_first_row():
+    ref = _limit_ref_price(
+        pd.Series(pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"])),
+        pd.Series([10.0, 11.0, 12.0]),
+    )
+    # 首行无前收 → NaN；其余为前一行收盘
+    assert np.isnan(ref[0])
+    assert list(ref[1:]) == [10.0, 11.0]
 
 
 def _run_all():

@@ -338,65 +338,107 @@ def to_baostock_code(code: str) -> str:
 # 6. A股涨跌停判断
 # ============================================================
 
+#: 沪深恢复统一 ±10% 涨跌幅限制的首日（此前无统一限制）
+LIMIT_START_DATE = date(1996, 12, 16)
+#: ST 特别处理制度实施首日（此前无 ST 股，名称不作 ST 判定）
+ST_START_DATE = date(1998, 4, 22)
+#: 未完成股改股票（简称前缀 S）实行 ±5% 的首日
+UNREFORMED_5PCT_DATE = date(2006, 10, 9)
+#: 创业板注册制改革首日：常规/ST 均 ±10%/±5% → ±20%，新股前 5 日不设限
+GEM_REFORM_DATE = date(2020, 8, 24)
+#: 主板注册制首批新股上市日：此后上市的主板新股前 5 日不设限
+MAIN_REGISTRATION_DATE = date(2023, 4, 10)
+#: 主板 ST/*ST ±5% → ±10% 首日（交易所公布涨跌停价实测：07-03 仍 ±5%，07-06 起 ±10%）
+MAIN_ST_10PCT_DATE = date(2026, 7, 6)
+
+
+def is_limit_5pct_name(name: str | None, trade_date: str | date | datetime) -> bool:
+    """该简称在 ``trade_date`` 是否属于"ST 类"限幅（传给 ``get_limit_pct(is_st=...)``）。
+
+    ST/*ST（及 SST/S*ST），以及 2006-10-09 起**未完成股改**的 S 前缀股票（交易所对其实行
+    ±5%，与 ST 同档；实测交易所公布涨跌停价印证）。退市整理期（简称含"退"）不在此列。
+    """
+    if not name:
+        return False
+    s = str(name).strip().upper()
+    if "ST" in s:
+        return True
+    return s.startswith("S") and parse_date(trade_date) >= UNREFORMED_5PCT_DATE
+
+
 def get_limit_pct(
     code: str,
     is_st: bool = False,
     trading_days_since_list: int | None = None,
+    trade_date: str | date | datetime | None = None,
+    list_date: str | date | datetime | None = None,
 ) -> float:
     """
-    获取股票涨跌停限制百分比
+    获取股票在 ``trade_date`` 的涨跌停限制百分比（按当日生效规则）。
 
-    A股涨跌停规则（2023-02-17 全面注册制后）：
-    - 主板（60x/00x）：±10%
-    - 主板 ST/*ST 股票：±5%
-    - 创业板（300/301）：±20%
-    - 科创板（688/689）：±20%
+    沪深北规则沿革（``trade_date`` 缺省 = 今天的规则）：
+    - 1996-12-16 之前：无统一涨跌幅限制 → ``inf``
+    - 主板（60x/00x）：±10%；ST/*ST ±5%（1998-04-22 起），2026-07-06 起 ST/*ST 也为 ±10%
+    - 创业板（300/301/302）：2020-08-24 前 ±10%（ST ±5%），之后 ±20%（含 ST）
+    - 科创板（688/689）：±20%（含 ST）
     - 北交所（43/83/87/88/92）：±30%
-    - 新股上市规则（仅在传入 trading_days_since_list 时生效）：
-        * 沪深主板 / 创业板 / 科创板：上市后前 5 个交易日不设涨跌幅限制，
-          第 6 交易日起恢复为各板块常规限制
-        * 北交所：上市首日不设涨跌幅限制，次交易日起 ±30%
+    - 新股不设限窗口（仅在传入 trading_days_since_list 时生效，按**上市日**所处制度）：
+        * 科创板、2020-08-24 起上市的创业板、2023-04-10 起上市的主板：前 5 个交易日
+        * 北交所：上市首日
+        * 此前上市的主板/创业板新股：首日按发行价另有规则（本函数不覆盖），
+          第 2 日起即为常规限制
 
     Args:
         code: 股票代码（任意格式）
-        is_st: 是否为 ST 股票（影响主板限制）
-        trading_days_since_list: 距上市首日的"已交易天数"（含上市当日，从 1 计数）。
-            - None（默认）：忽略新股规则，按板块常规限制返回。
-            - 1：上市首日。
-            - 2~5：上市后第 2~5 个交易日。
-            - >=6：恢复常规限制。
-            注意：必须传入"交易日"差值而非自然日；交易日历计算应由调用方
-            （如数据/回测引擎中的 trading_calendar）完成，避免本工具函数引入额外依赖。
+        is_st: 该日是否为 ST/*ST（点位名称判定由调用方完成）
+        trading_days_since_list: 上市后第几个交易日（含上市当日，从 1 计数）；None 忽略新股规则。
+            必须是"交易日"序号而非自然日，交易日历由调用方负责。
+        trade_date: 规则生效日期；None 表示今天。
+        list_date: 上市日，用于判定新股窗口所处制度；None 时用 ``trade_date`` 近似。
 
     Returns:
         涨跌停限制（小数形式，如 0.10 表示 ±10%）。
-        新股不设限期间返回 float('inf')，调用方需据此跳过涨跌停过滤。
+        不设限（新股窗口 / 1996-12-16 之前）返回 float('inf')，调用方需据此跳过涨跌停过滤。
     """
     code = format_code(code)
     suffix = code.split(".")[-1] if "." in code else ""
     base = code.split(".")[0]
     is_bj = suffix == "BJ"
+    is_gem = base.startswith(("300", "301", "302"))
+    is_star = base.startswith(("688", "689"))
+    d = parse_date(trade_date) if trade_date is not None else date.today()
 
-    # 新股上市无涨跌幅限制窗口
+    if d < LIMIT_START_DATE:
+        return float("inf")
+
+    # 新股上市无涨跌幅限制窗口（按上市日所处制度）
     if trading_days_since_list is not None and trading_days_since_list >= 1:
-        if is_bj and trading_days_since_list <= 1:
-            # 北交所：仅上市首日不设限
-            return float("inf")
-        if (not is_bj) and trading_days_since_list <= 5:
-            # 沪深主板 / 创业板 / 科创板：前 5 个交易日不设限
+        ld = parse_date(list_date) if list_date is not None else d
+        if is_bj:
+            window = 1
+        elif is_star:
+            window = 5
+        elif is_gem:
+            window = 5 if ld >= GEM_REFORM_DATE else 0
+        else:
+            window = 5 if ld >= MAIN_REGISTRATION_DATE else 0
+        if trading_days_since_list <= window:
             return float("inf")
 
     # 北交所（按后缀判断更可靠，覆盖 43/83/87/88/92 及其它 4/8 开头）
     if is_bj:
         return 0.30
-    # 创业板
-    if base.startswith(("300", "301")):
-        return 0.20
+    st = is_st and d >= ST_START_DATE
+    # 创业板：改革前与主板同规则
+    if is_gem:
+        if d >= GEM_REFORM_DATE:
+            return 0.20
+        return 0.05 if st else 0.10
     # 科创板
-    if base.startswith(("688", "689")):
+    if is_star:
         return 0.20
     # 主板 ST 股
-    if is_st:
+    if st and d < MAIN_ST_10PCT_DATE:
         return 0.05
     # 主板普通股
     return 0.10
@@ -594,10 +636,15 @@ if __name__ == "__main__":
     assert get_limit_pct("000001.SZ") == 0.10
     assert get_limit_pct("300750.SZ") == 0.20
     assert get_limit_pct("688981.SH") == 0.20
-    assert get_limit_pct("600000.SH", is_st=True) == 0.05
+    assert get_limit_pct("600000.SH", is_st=True, trade_date="2026-07-03") == 0.05
+    assert get_limit_pct("600000.SH", is_st=True, trade_date="2026-07-06") == 0.10, "主板 ST 自 2026-07-06 起 ±10%"
+    assert get_limit_pct("300001.SZ", trade_date="2020-08-21") == 0.10, "创业板改革前 ±10%"
+    assert get_limit_pct("600000.SH", trade_date="1996-12-13") == float("inf"), "1996-12-16 前无统一限制"
     assert get_limit_pct("830799") == 0.30, "北交所应为 30%"
     assert get_limit_pct("920001") == 0.30, "北交所 92 前缀应为 30%"
-    # 新股上市窗口：沪深主板/创业板/科创板前 5 个交易日不设限
+    # 新股上市窗口：科创板/注册制创业板/注册制主板前 5 个交易日不设限
+    assert get_limit_pct("600001.SH", trading_days_since_list=3, list_date="2023-04-10") == float("inf")
+    assert get_limit_pct("600001.SH", trading_days_since_list=3, list_date="2023-04-06") == 0.10, "核准制主板新股第 2 日起 ±10%"
     assert get_limit_pct("301236", trading_days_since_list=1) == float("inf"), "创业板新股首日无限制"
     assert get_limit_pct("688981", trading_days_since_list=5) == float("inf"), "科创板新股第 5 日无限制"
     assert get_limit_pct("301236", trading_days_since_list=6) == 0.20, "创业板第 6 日恢复 ±20%"
