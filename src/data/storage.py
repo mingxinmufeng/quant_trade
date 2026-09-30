@@ -10,6 +10,7 @@
     {store}/daily_meta/{code}.parquet     # 日线加工层：交易日时间轴 + 停牌/状态 + 涨跌停价（可重算）
     {store}/min1/{code}.parquet           # 不复权 1 分钟 OHLCV
     {store}/min5/{code}.parquet           # 不复权 5 分钟 OHLCV
+    {store}/{freq}_{YYYY}/{code}.parquet  # 增量（market_fetch 每日写入；历史文件冻结），read_raw 合并读取
     {store}/factors/{code}.parquet        # date → cum_factor（生效因子，覆盖刷新）
     {store}/factors_gbbq/{code}.parquet   # date → cum_factor（gbbq 自算并存记录，供交叉对比）
     {store}/gbbq_events.parquet           # 全市场权息事件快照（update 时按版本戳落盘）
@@ -190,21 +191,41 @@ class DataStore:
     # 原始数据读写
     # ------------------------------------------------------------
 
+    def increment_paths(self, code: str, freq: str) -> list[Path]:
+        """增量文件 ``{store}/{freq}_{YYYY}/{code}.parquet``（按年份升序）。
+
+        历史文件 ``{freq}/{code}.parquet`` 冻结不改；每日新数据由 market_fetch 按行所在年份
+        写入增量目录，读取时合并（同一时间点以增量为准）。年底可把增量并入历史文件。
+        """
+        base = FREQ_DIRS[freq]
+        dirs = sorted(p for p in self._store_path.glob(f"{base}_[0-9][0-9][0-9][0-9]") if p.is_dir())
+        return [p / f"{code}.parquet" for p in dirs if (p / f"{code}.parquet").exists()]
+
     def read_raw(self, code: str, freq: str) -> pd.DataFrame | None:
-        """原始数据（数据源返回的行，不含停牌占位与加工列）。日线要带停牌/涨跌停请用 ``read_view``。"""
+        """原始数据（数据源返回的行，不含停牌占位与加工列）。日线要带停牌/涨跌停请用 ``read_view``。
+
+        历史文件与增量文件（见 ``increment_paths``）合并返回。
+        """
         path = self.freq_path(code, freq)
-        if not path.exists():
+        paths = ([path] if path.exists() else []) + self.increment_paths(code, freq)
+        if not paths:
             return None
         try:
-            df = pd.read_parquet(path)
             tc = _time_col(freq)
-            df[tc] = pd.to_datetime(df[tc])
-            if "source" not in df.columns:
-                df["source"] = "legacy"
+            parts = []
+            for p in paths:
+                part = pd.read_parquet(p)
+                part[tc] = pd.to_datetime(part[tc])
+                if "source" not in part.columns:
+                    part["source"] = "legacy"
+                parts.append(part)
+            df = parts[0] if len(parts) == 1 else pd.concat(parts, ignore_index=True)
+            if len(parts) > 1:
+                df = df.drop_duplicates(subset=[tc], keep="last")
             df["source"] = df["source"].fillna("legacy").astype("string")
             return df.sort_values(tc).reset_index(drop=True)
         except Exception as exc:
-            logger.warning(f"读取本地缓存 {path} 失败: {exc}（视为不存在重拉）")
+            logger.warning(f"读取本地缓存 {paths} 失败: {exc}（视为不存在重拉）")
             return None
 
     def write_raw(self, code: str, freq: str, df: pd.DataFrame) -> None:
@@ -285,6 +306,8 @@ class DataStore:
         cache_mt = cache.stat().st_mtime
         raw = self.freq_path(code, freq)
         if raw.exists() and raw.stat().st_mtime > cache_mt:
+            return False
+        if any(p.stat().st_mtime > cache_mt for p in self.increment_paths(code, freq)):
             return False
         if freq == "daily":
             meta = self.daily_meta_path(code)
