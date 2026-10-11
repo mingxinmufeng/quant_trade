@@ -84,6 +84,9 @@ def test_fetch_remote_all_fail_raises(tmp_path, monkeypatch):
     boom = lambda: (_ for _ in ()).throw(RuntimeError("x"))  # noqa: E731
     monkeypatch.setattr(cal, "_fetch_tushare", boom)
     monkeypatch.setattr(cal, "_fetch_akshare", boom)
+    from a_share_quant_pro.utils import helpers
+
+    monkeypatch.setattr(helpers.time, "sleep", lambda s: None)  # retry 退避不真等
     # 空返回也算失败
     with pytest.raises(RuntimeError, match="全部日历源失败"):
         cal._fetch_remote()

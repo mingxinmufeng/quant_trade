@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pytdx.hq import TdxHq_API
 
-# 通达信主站配置（从 D:\new_tdx\connect.cfg 提取）
+# 通达信主站配置（从通达信安装目录下 connect.cfg 提取）
 HOSTS = [
     ("110.41.147.114", 7709),
     ("124.223.163.242", 7709),
@@ -97,10 +97,19 @@ if __name__ == "__main__":
     parser.add_argument("code", help="股票代码，如 000001")
     parser.add_argument("--market", choices=["sz", "sh", "bj"], default="sz",
                         help="市场，默认 sz")
-    parser.add_argument("--out", default=r"D:\new_tdx\f10_export",
-                        help="输出目录")
+    parser.add_argument("--out", default=None,
+                        help="输出目录；缺省取配置 data.tdx_path/f10_export，"
+                             "未配置通达信路径则取 data.store_path/f10_export")
     args = parser.parse_args()
 
+    out_dir = args.out
+    if out_dir is None:
+        from a_share_quant_pro.utils.config_loader import load_config
+
+        data_cfg = load_config().get("data", {})
+        base = (data_cfg.get("tdx_path") or "").strip() or data_cfg.get("store_path", "data_store")
+        out_dir = Path(base) / "f10_export"
+
     market = MARKET_MAP[args.market]
-    out = save_f10(market, args.code, Path(args.out))
+    out = save_f10(market, args.code, Path(out_dir))
     print(f"\n完成，输出目录: {out}")
